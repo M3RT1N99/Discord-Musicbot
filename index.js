@@ -487,22 +487,48 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
         proc.stderr.on("data", d => {
             const str = d.toString();
             stderr += str;
-            // parse percent pattern from yt-dlp/yt-dlp stderr lines like:
+            
+            // Debug: Log alle stderr Zeilen um Progress-Format zu verstehen
+            console.log("[DOWNLOAD DEBUG]", str.trim());
+            
+            // Verbesserte Regex-Pattern für verschiedene yt-dlp Progress-Formate:
             // [download]  12.3% of 3.45MiB at 123.45KiB/s ETA 00:12
-            const m = str.match(/(\d{1,3}\.\d+)% of .* at ([\d\.]+\w+\/s) ETA (\d{2}:\d{2}(:\d{2})?)/);
-            const m2 = str.match(/(\d{1,3}\.\d+)%/);
-            if (m) {
-                const percent = parseFloat(m[1]);
-                const speed = m[2];
-                const eta = m[3];
-                lastProgress = { percent, speed, eta, raw: str };
-                if (progressCb) progressCb(lastProgress);
-            } else if (m2) {
-                lastProgress = { percent: parseFloat(m2[1]), raw: str };
-                if (progressCb) progressCb(lastProgress);
-            } else {
-                // forward raw lines occasionally
-                if (progressCb) progressCb({ raw: str });
+            // [download] 100% of 3.45MiB in 00:12
+            // [download]   0.1% of ~  3.45MiB at  123.45KiB/s ETA 00:12
+            const patterns = [
+                // Vollständiges Format mit Speed und ETA
+                /\[download\]\s*(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+at\s+([\d\.]+\w+\/s)\s+ETA\s+(\d{2}:\d{2}(?::\d{2})?)/,
+                // Format ohne Speed/ETA (z.B. bei 100%)
+                /\[download\]\s*(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+/,
+                // Einfaches Prozent-Format
+                /(\d{1,3}(?:\.\d+)?)%/
+            ];
+            
+            let matched = false;
+            for (const pattern of patterns) {
+                const match = str.match(pattern);
+                if (match) {
+                    const percent = parseFloat(match[1]);
+                    const speed = match[2] || null;
+                    const eta = match[3] || null;
+                    
+                    lastProgress = { 
+                        percent, 
+                        speed, 
+                        eta, 
+                        raw: str.trim() 
+                    };
+                    
+                    console.log("[PROGRESS PARSED]", lastProgress);
+                    if (progressCb) progressCb(lastProgress);
+                    matched = true;
+                    break;
+                }
+            }
+            
+            if (!matched) {
+                // Forward raw lines für Debug
+                if (progressCb) progressCb({ raw: str.trim() });
             }
         });
 
@@ -1229,41 +1255,57 @@ if (audioCache.has(url)) {
     // Progress callback (akzeptiert sowohl String als auch Objekt)
     const progressCb = (data) => {
         try {
-            // extrahiere Prozent (unterstützt: { percent, raw }, oder reiner String)
             let percent = null;
 
             if (data && typeof data === "object") {
-                // objekt-form (downloadSingleTo sendet so)
+                // Neues Format von downloadSingleTo
                 if (typeof data.percent === "number") {
                     percent = data.percent;
+                    console.log(`[PROGRESS CB] Received percent: ${percent}%`);
                 } else if (typeof data.raw === "string") {
-                    const m = data.raw.match(/\[download\]\s+(\d{1,3}\.\d)%/);
-                    if (m) percent = parseFloat(m[1]);
+                    // Fallback: Parse aus raw string mit verbesserter Regex
+                    console.log(`[PROGRESS CB] Parsing raw: ${data.raw}`);
+                    const patterns = [
+                        /\[download\]\s*(\d{1,3}(?:\.\d+)?)%/,
+                        /(\d{1,3}(?:\.\d+)?)%/
+                    ];
+                    
+                    for (const pattern of patterns) {
+                        const match = data.raw.match(pattern);
+                        if (match) {
+                            percent = parseFloat(match[1]);
+                            console.log(`[PROGRESS CB] Parsed percent from raw: ${percent}%`);
+                            break;
+                        }
+                    }
                 }
             } else if (typeof data === "string") {
-                // string-form (falls irgendwas string-Only sendet)
-                const m = data.match(/\[download\]\s+(\d{1,3}\.\d)%/);
-                if (m) percent = parseFloat(m[1]);
+                // Legacy string-form
+                console.log(`[PROGRESS CB] Legacy string: ${data}`);
+                const match = data.match(/(\d{1,3}(?:\.\d+)?)%/);
+                if (match) {
+                    percent = parseFloat(match[1]);
+                }
             }
 
-            if (percent !== null && !isNaN(percent)) {
-                // update bereits abstand-basiert (5% für weniger Spam)
-                if (!progressCb.lastPercent || percent - progressCb.lastPercent >= 5) {
+            if (percent !== null && !isNaN(percent) && percent >= 0 && percent <= 100) {
+                // Update mit 5% Abstand für weniger Spam, aber immer bei 100%
+                if (!progressCb.lastPercent || percent - progressCb.lastPercent >= 5 || percent === 100) {
                     progressCb.lastPercent = percent;
                     try {
-                        progressEmbed.setDescription(`${percent.toFixed(0)}% abgeschlossen`);
+                        const description = `${percent.toFixed(0)}% abgeschlossen${data.speed ? ` (${data.speed})` : ''}${data.eta ? ` ETA: ${data.eta}` : ''}`;
+                        progressEmbed.setDescription(description);
                         progressMsg.edit({ embeds: [progressEmbed] }).catch(()=>{});
-                        console.log(`[PROGRESS] ${percent.toFixed(1)}% completed`);
-                    } catch (e) { 
+                        console.log(`[PROGRESS UPDATE] ${percent.toFixed(1)}% completed`);
+                    } catch (e) {
                         console.warn("[PROGRESS UPDATE ERROR]", e.message);
                     }
                 }
             } else {
-                console.log(`[PROGRESS DEBUG] No valid percent found in:`, data);
+                console.log(`[PROGRESS DEBUG] Invalid or no percent found. Data:`, data);
             }
         } catch (e) {
-            // safe-ignore parsing problems
-            console.warn("[PROGRESS CB ERROR]", e && e.message ? e.message : e);
+            console.warn("[PROGRESS CB ERROR]", e?.message || e);
         }
     };
     progressCb.lastPercent = 0;
