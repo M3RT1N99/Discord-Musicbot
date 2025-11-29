@@ -154,31 +154,25 @@ function isYouTubePlaylistUrl(u) {
 
 // Extrahiert saubere YouTube URL ohne Parameter
 function cleanYouTubeUrl(url) {
-    if (!isValidYouTubeUrl(url)) return null;
+    if (!url) return null;
     
-    try {
-        const urlObj = new URL(url);
-        
-        // Für youtu.be Links
-        if (urlObj.hostname === 'youtu.be') {
-            const videoId = urlObj.pathname.substring(1);
-            if (videoId && /^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
-                return `https://www.youtube.com/watch?v=${videoId}`;
-            }
+    // Versuche, die Video-ID zu extrahieren
+    const patterns = [
+        /(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/, // Standard
+        /(?:https?:\/\/)?(?:www\.)?youtube\.com\/v\/([a-zA-Z0-9_-]{11})/,       // /v/VIDEOID
+        /(?:https?:\/\/)?(?:www\.)?youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/,   // /embed/VIDEOID
+        /(?:https?:\/\/)?youtu\.be\/([a-zA-Z0-9_-]{11})/                        // Kurzlink
+    ];
+
+    for (const pattern of patterns) {
+        const match = url.match(pattern);
+        if (match && match[1]) {
+            return `https://www.youtube.com/watch?v=${match[1]}`;
         }
-        
-        // Für youtube.com Links
-        if (urlObj.hostname.includes('youtube.com')) {
-            const videoId = urlObj.searchParams.get('v');
-            if (videoId && /^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
-                return `https://www.youtube.com/watch?v=${videoId}`;
-            }
-        }
-        
-        return null;
-    } catch {
-        return null;
     }
+
+    // Kein gültiger Link gefunden
+    return null;
 }
 
 // Prüft ob es eine echte Playlist ist (nicht Auto-Mix/Radio)
@@ -308,7 +302,7 @@ const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 Minute
 
 // --------------------------- Search Cache ---------------------------
 const searchCache = new Map(); // userId -> { results: [], timestamp }
-const SEARCH_CACHE_TIMEOUT = 5 * 60 * 1000; // 5 Minuten
+const SEARCH_CACHE_TIMEOUT = 1 * 60 * 1000; // 1 Minute
 
 function checkRateLimit(userId) {
     const now = Date.now();
@@ -343,7 +337,8 @@ function createPlayerForGuild(gid, connection) {
             });
             queue.nowPlayingMessage = null;
         }
-        
+
+        console.log("[DEBUG] CALLING downloadSingleTo", filepath, next.url, "progressCb type:", typeof progressCb);
         // ensure next track is downloaded and played (this handles lazy downloads)
         ensureNextTrackDownloadedAndPlay(gid).catch(e => console.error("[ENSURE NEXT ERROR]", e?.message || e));
     });
@@ -434,7 +429,7 @@ async function getYtdlpInfo(urlOrQuery) {
     }
 
     // use -J to get JSON
-    const args = ["-J", "--no-warnings", "--socket-timeout", "60", urlOrQuery];
+    const args = ["-J", "--no-warnings","--ignore-errors", "--socket-timeout", "60", urlOrQuery];
     const { stdout } = await spawnYtdlp(args);
     return JSON.parse(stdout);
 }
@@ -488,7 +483,6 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
             return reject(new Error('Invalid filepath'));
         }
 
-        // Stelle sicher, dass filepath im erlaubten Verzeichnis ist
         const normalizedPath = path.normalize(filepath);
         const normalizedDownloadDir = path.normalize(DOWNLOAD_DIR);
         if (!normalizedPath.startsWith(normalizedDownloadDir)) {
@@ -496,6 +490,7 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
         }
 
         ensureDir(DOWNLOAD_DIR);
+
         const args = [
             "-f", "bestaudio",
             "--extract-audio",
@@ -505,82 +500,45 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
             "--retries", "3",
             "--no-warnings",
             "--no-playlist",
+            "--ignore-errors",
+            "--newline", // wichtig für line-by-line output
             "-o", filepath,
             urlOrId
         ];
-        const proc = spawn(YTDLP_BIN, args, { shell: false });
-        let stderr = "";
-        let lastProgress = null;
 
-        proc.stderr.on("data", d => {
-            const str = d.toString();
-            stderr += str;
-            
-            // Debug: Log nur Progress-relevante Zeilen
-            if (str.includes('[download]') || str.includes('%')) {
-                console.log("[DOWNLOAD DEBUG]", str.trim());
+        const proc = spawn(YTDLP_BIN, args, { shell: true });
+
+        let stderr = "";
+
+        proc.stdout.on("data", d => {
+            const line = d.toString().trim();
+            console.log("downloadSingleTo [DOWNLOAD STDOUT RAW]", line);
+
+            if (progressCb) {
+                try { progressCb(line); } 
+                catch (err) { console.error("downloadSingleTo [PROGRESS_CB ERROR]", err.message); }
             }
-            
-            // Verbesserte Regex-Pattern für echte yt-dlp Progress-Formate:
-            // [download]   2.3% of  227.22MiB at  100.00KiB/s ETA 37:53
-            // [download] 100% of  227.22MiB in 00:00:05 at 40.63MiB/s
-            // [download]   0.1% of ~  3.45MiB at  123.45KiB/s ETA 00:12
-            const patterns = [
-                // Vollständiges Format mit Speed und ETA: [download]   2.3% of  227.22MiB at  100.00KiB/s ETA 37:53
-                /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+at\s+([\d\.]+\w+\/s)\s+ETA\s+(\d{1,2}:\d{2}(?::\d{2})?)/,
-                // Format mit "in" statt ETA: [download] 100% of  227.22MiB in 00:00:05 at 40.63MiB/s
-                /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+in\s+\d{1,2}:\d{2}(?::\d{2})?\s+at\s+([\d\.]+\w+\/s)/,
-                // Format ohne Speed/ETA: [download] 100% of  227.22MiB
-                /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+/,
-                // Einfaches Prozent-Format als Fallback
-                /(\d{1,3}(?:\.\d+)?)%/
-            ];
-            
-            let matched = false;
-            for (const pattern of patterns) {
-                const match = str.match(pattern);
-                if (match) {
-                    const percent = parseFloat(match[1]);
-                    const speed = match[2] || null;
-                    const eta = match[3] || null;
-                    
-                    lastProgress = { 
-                        percent, 
-                        speed, 
-                        eta, 
-                        raw: str.trim() 
-                    };
-                    
-                    console.log("[PROGRESS PARSED] ✅", lastProgress);
-                    if (progressCb) {
-                        console.log("[PROGRESS PARSED] 📞 Calling progressCb with:", lastProgress);
-                        progressCb(lastProgress);
-                    } else {
-                        console.log("[PROGRESS PARSED] ❌ No progressCb function!");
-                    }
-                    matched = true;
-                    break;
-                }
-            }
-            
-            if (!matched) {
-                // Forward raw lines für Debug
-                console.log("[PROGRESS PARSED] ❌ No pattern matched, forwarding raw:", str.trim());
-                if (progressCb) {
-                    progressCb({ raw: str.trim() });
-                } else {
-                    console.log("[PROGRESS PARSED] ❌ No progressCb function for raw data!");
-                }
-            }
+            console.log("downloadSingleTo [DOWNLOAD STDOUT]", line);
         });
 
-        const timer = setTimeout(() => { proc.kill("SIGKILL"); reject(new Error("Download timeout")); }, DOWNLOAD_TIMEOUT_MS);
+        // Timeout, falls Download hängt
+        const timer = setTimeout(() => {
+            proc.kill("SIGKILL");
+            reject(new Error("Download timeout"));
+        }, DOWNLOAD_TIMEOUT_MS);
 
-        proc.on("error", err => { clearTimeout(timer); reject(err); });
+        proc.on("error", err => {
+            clearTimeout(timer);
+            reject(err);
+        });
+
         proc.on("close", code => {
             clearTimeout(timer);
-            if (code === 0 && fs.existsSync(filepath)) resolve({ filepath, stderr });
-            else reject(new Error(`yt-dlp failed (${code}): ${stderr.split("\n").slice(-6).join("\n")}`));
+            if (code === 0 && fs.existsSync(filepath)) {
+                resolve({ filepath, stderr });
+            } else {
+                reject(new Error(`yt-dlp failed (${code}): ${stderr.split("\n").slice(-6).join("\n")}`));
+            }
         });
     });
 }
@@ -591,7 +549,7 @@ async function getVideoInfo(urlOrId) {
         throw new Error('Invalid or unsafe URL');
     }
 
-    const args = ["-J", "--no-warnings", urlOrId];
+    const args = ["-J", "--no-warnings","--ignore-errors", urlOrId];
     console.log(`[VIDEO INFO] Getting info for: ${urlOrId}`);
     const start = Date.now();
     
@@ -1378,9 +1336,10 @@ if (audioCache.has(url)) {
     // Progress callback every 5%
     // Progress callback (akzeptiert sowohl String als auch Objekt)
     const progressCb = (data) => {
+        console.log("[PROGRESS_CB ENTER]", data);
+
         try {
-            console.log(`[PROGRESS CB] ===== RECEIVED DATA =====`);
-            console.log(`[PROGRESS CB] Type: ${typeof data}, Value:`, data);
+            if (typeof data === "string") data = { raw: data };
             let percent = null;
 
             if (data && typeof data === "object") {
@@ -1537,16 +1496,18 @@ async function ensureNextTrackDownloadedAndPlay(guildId) {
     if (!next) return;
 
     // if filepath exists -> play immediately
-    if (next.filepath && fs.existsSync(next.filepath)) {
+   if (next.filepath) {
+    try {
+        await fs.promises.access(next.filepath);
         playNextInGuild(guildId);
         return;
-    }
-
+    } catch {}
+}
     // else we need to download the next.url (lazy)
     if (!next.url) {
         // invalid entry -> drop and try next
         q.songs.shift();
-        return ensureNextTrackDownloadedAndPlay(guildId);
+        return await ensureNextTrackDownloadedAndPlay(guildId);
     }
 
     // build filepath
@@ -1560,7 +1521,8 @@ async function ensureNextTrackDownloadedAndPlay(guildId) {
 
     try {
         // download (synchronous in promise but does not block event loop)
-        await downloadSingleTo(filepath, next.url, /*progressCb*/ () => {});
+        console.log("CALLING downloadSingleTo", filepath, next.url)
+        await downloadSingleTo(filepath, next.url, progressCb);
         audioCache.set(next.url, filepath, { title: next.title, duration: next.duration });
         next.filepath = filepath;
         // play
