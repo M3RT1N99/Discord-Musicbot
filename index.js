@@ -39,6 +39,28 @@ function sanitizeString(input) {
     return input.replace(/[<>"|&;$`\\]/g, '').trim();
 }
 
+// Hilfsfunktion für sichere Follow-Up Nachrichten mit Timeout-Prüfung
+async function safeFollowUp(interaction, content, options = {}) {
+    try {
+        const interactionAge = Date.now() - interaction.createdTimestamp;
+        const canFollowUp = interactionAge < 14 * 60 * 1000; // 14 Minuten
+        
+        if (!canFollowUp) {
+            console.warn("[FOLLOWUP TIMEOUT] Interaction too old for follow-up");
+            return null;
+        }
+        
+        return await interaction.followUp(typeof content === 'string' ? { content, ...options } : content);
+    } catch (error) {
+        if (error.code === 10062) {
+            console.warn("[FOLLOWUP EXPIRED] Interaction token expired");
+        } else {
+            console.error("[FOLLOWUP ERROR]", error);
+        }
+        return null;
+    }
+}
+
 function validateUrl(urlString) {
     if (!urlString || typeof urlString !== 'string') return false;
     if (urlString.length > MAX_URL_LENGTH) return false;
@@ -677,10 +699,10 @@ client.on("interactionCreate", async interaction => {
                             // Wenn noch Rest vorhanden -> nächsten Track versuchen
                             if (restEntries.length > 0) {
                                 const nextEntry = restEntries.shift();
-                                await interaction.followUp(`⚠️ Fehler bei Track "${entry.title}", überspringe zu "${nextEntry.title}"`);
+                                await safeFollowUp(interaction, `⚠️ Fehler bei Track "${entry.title}", überspringe zu "${nextEntry.title}"`);
                                 await safePlay(nextEntry);
                             } else {
-                                await interaction.followUp("⚠️ Alle Tracks der Playlist fehlerhaft oder nicht verfügbar.");
+                                await safeFollowUp(interaction, "⚠️ Alle Tracks der Playlist fehlerhaft oder nicht verfügbar.");
                             }
                         }
                     }
@@ -688,7 +710,7 @@ client.on("interactionCreate", async interaction => {
                     // starte erstes Lied
                     await safePlay(firstEntry);
 
-                    await interaction.followUp(`➕ Playlist **${playlistTitle}** (${entries.length} Einträge) zur Queue hinzugefügt.`);
+                    await safeFollowUp(interaction, `➕ Playlist **${playlistTitle}** (${entries.length} Einträge) zur Queue hinzugefügt.`);
                     return;
                 }
 
@@ -859,19 +881,31 @@ client.on("interactionCreate", async interaction => {
         const safeErrorMessage = sanitizeString(errorMessage);
         
         try {
-            if (!interaction.replied && !interaction.deferred) {
+            // Prüfe ob Interaction noch gültig ist (nicht älter als 2.5 Sekunden für reply)
+            const interactionAge = Date.now() - interaction.createdTimestamp;
+            const canReply = !interaction.replied && !interaction.deferred && interactionAge < 2500;
+            const canFollowUp = (interaction.replied || interaction.deferred) && interactionAge < 14 * 60 * 1000; // 14 Minuten
+            
+            if (canReply) {
                 await interaction.reply({ 
                     content: truncateMessage(`❌ Fehler: ${safeErrorMessage}`), 
                     ephemeral: true 
                 });
-            } else {
+            } else if (canFollowUp) {
                 await interaction.followUp({ 
                     content: truncateMessage(`❌ Fehler: ${safeErrorMessage}`), 
                     ephemeral: true 
                 });
+            } else {
+                console.warn("[INTERACTION TIMEOUT] Cannot respond to interaction - too old or already handled");
             }
         } catch (replyError) {
-            console.error("[ERROR REPLY FAILED]", replyError);
+            // Prüfe ob es ein "Unknown interaction" Fehler ist
+            if (replyError.code === 10062) {
+                console.warn("[INTERACTION EXPIRED] Interaction token expired, cannot respond");
+            } else {
+                console.error("[ERROR REPLY FAILED]", replyError);
+            }
         }
         
         // Bei kritischen Fehlern: Queue cleanup
@@ -976,7 +1010,7 @@ if (audioCache.has(url)) {
         video = await getVideoInfo(url);
     } catch (err) {
         console.error("[VIDEO INFO ERROR]", err.message);
-        return interaction.followUp(`❌ Konnte Video-Info nicht abrufen: ${err.message}`);
+        return await safeFollowUp(interaction, `❌ Konnte Video-Info nicht abrufen: ${err.message}`);
     }
 
     // Initial embed
@@ -1043,13 +1077,11 @@ if (audioCache.has(url)) {
             url,
             duration: video.duration
         });
-        try {
-            await interaction.followUp(`✅ Download fertig: **${video.title}** — zur Queue hinzugefügt.`);
-        } catch {}
+        await safeFollowUp(interaction, `✅ Download fertig: **${video.title}** — zur Queue hinzugefügt.`);
         if (queue.player.state.status !== AudioPlayerStatus.Playing) await ensureNextTrackDownloadedAndPlay(guildId);
     }).catch(async (err) => {
         console.error("[DOWNLOAD ERROR]", err.message);
-        try { await interaction.followUp(`❌ Download fehlgeschlagen: ${err.message}`); } catch {}
+        await safeFollowUp(interaction, `❌ Download fehlgeschlagen: ${err.message}`);
     });
 }
 
