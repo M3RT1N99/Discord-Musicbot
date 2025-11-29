@@ -14,7 +14,8 @@ const TOKEN = process.env.TOKEN;
 const YTDLP_BIN = process.env.YTDLP_PATH || "/opt/venv/bin/yt-dlp";
 const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || "/tmp/muse_downloads";
 const MAX_CACHE = parseInt(process.env.MAX_CACHE || "200", 10);
-const DOWNLOAD_TIMEOUT_MS = (parseInt(process.env.DOWNLOAD_TIMEOUT_SEC || "120", 10)) * 1000; // default 5 min
+const DOWNLOAD_TIMEOUT_MS = (parseInt(process.env.DOWNLOAD_TIMEOUT_SEC || "120", 10)) * 1000; // default 2 min
+const SEARCH_TIMEOUT_MS = (parseInt(process.env.SEARCH_TIMEOUT_SEC || "30", 10)) * 1000; // default 30 sec
 const JOIN_RETRIES = 2; // retry join attempts on failure
 const PROGRESS_EDIT_INTERVAL_MS = 2500; // how often we edit progress message
 
@@ -326,6 +327,39 @@ function spawnYtdlp(args, opts = {}) {
     });
 }
 
+// Spezielle Funktion für Suchoperationen mit kürzerem Timeout
+function spawnYtdlpSearch(args, opts = {}) {
+    return new Promise((resolve, reject) => {
+        // Validiere alle Argumente
+        const safeArgs = args.filter(arg => {
+            if (typeof arg !== 'string') return false;
+            // Verhindere gefährliche Flags
+            if (arg.startsWith('--exec') || arg.startsWith('--command')) return false;
+            if (arg.includes('..') || arg.includes('\x00')) return false;
+            return true;
+        });
+
+        const proc = spawn(YTDLP_BIN, safeArgs, { 
+            ...opts, 
+            stdio: ["ignore","pipe","pipe"],
+            shell: false // Verhindere Shell-Injection
+        });
+        let stdout = "", stderr = "";
+        proc.stdout.on("data", d => { stdout += d.toString(); });
+        proc.stderr.on("data", d => { stderr += d.toString(); });
+        const timer = setTimeout(() => { 
+            proc.kill("SIGKILL"); 
+            reject(new Error("Search timeout - try a more specific query")); 
+        }, SEARCH_TIMEOUT_MS);
+        proc.on("error", err => { clearTimeout(timer); reject(err); });
+        proc.on("close", code => { 
+            clearTimeout(timer); 
+            if (code === 0) resolve({ stdout, stderr, code }); 
+            else reject(new Error(`Search failed: ${stderr.split("\n").slice(-3).join("\n")}`)); 
+        });
+    });
+}
+
 // Get info JSON for url or search query. Accepts "ytsearch1:..." style query too.
 async function getYtdlpInfo(urlOrQuery) {
     // Validiere Input
@@ -505,7 +539,7 @@ async function searchVideos(query, maxResults = 10, platform = 'youtube') {
         searchQuery
     ];
     
-    const { stdout } = await spawnYtdlp(args);
+    const { stdout } = await spawnYtdlpSearch(args);
     const info = JSON.parse(stdout);
     
     if (!info.entries || !Array.isArray(info.entries)) {
@@ -616,9 +650,9 @@ client.on("interactionCreate", async interaction => {
                     return interaction.reply({ content: `❌ Eingabe zu lang (max. ${MAX_QUERY_LENGTH} Zeichen).`, ephemeral: true });
                 }
                 
-                // initial reply and keep message to edit progress
-                await interaction.reply({ content: `🔎 Verarbeite: ${truncateMessage(sanitizedQuery, 100)}`, withResponse: true });
-                const replyMsg = await interaction.fetchReply(); // holt die Message danach
+                // Defer reply für längere Operationen
+                await interaction.deferReply();
+                const replyMsg = await interaction.editReply({ content: `🔎 Verarbeite: ${truncateMessage(sanitizedQuery, 100)}` });
 
                 // Ensure queue exists or create when needed
                 async function ensureQueueAndJoin() {
@@ -723,13 +757,20 @@ client.on("interactionCreate", async interaction => {
                     }
                     
                     await interaction.editReply("🔍 Suche nach Videos...");
+                    console.log(`[SEARCH START] Query: "${sanitizedQuery}"`);
                     
                     let searchResults;
                     try {
+                        const searchStart = Date.now();
                         searchResults = await searchYouTubeVideos(sanitizedQuery, 10);
+                        const searchTime = Date.now() - searchStart;
+                        console.log(`[SEARCH SUCCESS] Found ${searchResults.length} results in ${searchTime}ms`);
                     } catch (e) {
-                        console.warn("[YOUTUBE SEARCH ERROR]", e?.message || e);
-                        return interaction.editReply(`❌ Suche fehlgeschlagen: ${e.message}`);
+                        console.error("[YOUTUBE SEARCH ERROR]", e?.message || e);
+                        const errorMsg = e.message.includes('timeout') 
+                            ? "❌ Suche dauerte zu lange. Versuche einen spezifischeren Suchbegriff."
+                            : `❌ Suche fehlgeschlagen: ${e.message}`;
+                        return interaction.editReply(errorMsg);
                     }
 
                     if (!searchResults || searchResults.length === 0) {
