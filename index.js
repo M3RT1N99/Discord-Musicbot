@@ -307,6 +307,15 @@ function createPlayerForGuild(gid, connection) {
     const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
     player.on("error", err => console.error(`[PLAYER ERROR][${gid}]`, err?.message || err));
     player.on(AudioPlayerStatus.Idle, () => {
+        // Lösche die "Now Playing" Nachricht wenn Song fertig ist
+        const queue = guildQueues.get(gid);
+        if (queue && queue.nowPlayingMessage) {
+            queue.nowPlayingMessage.delete().catch(() => {
+                // Ignoriere Fehler beim Löschen (z.B. Nachricht bereits gelöscht)
+            });
+            queue.nowPlayingMessage = null;
+        }
+        
         // ensure next track is downloaded and played (this handles lazy downloads)
         ensureNextTrackDownloadedAndPlay(gid).catch(e => console.error("[ENSURE NEXT ERROR]", e?.message || e));
     });
@@ -911,12 +920,25 @@ client.on("interactionCreate", async interaction => {
 
             case "skip": {
                 if (!queue) return interaction.reply("Keine Musik läuft.");
+                
+                // Lösche "Now Playing" Nachricht (wird auch automatisch durch Idle Event gelöscht)
+                if (queue.nowPlayingMessage) {
+                    queue.nowPlayingMessage.delete().catch(() => {});
+                    queue.nowPlayingMessage = null;
+                }
+                
                 queue.player.stop(); // triggers Idle -> next track
                 return interaction.reply("⏭️ Übersprungen.");
             }
 
             case "stop": {
                 if (!queue) return interaction.reply("Keine Musik läuft.");
+                
+                // Lösche "Now Playing" Nachricht
+                if (queue.nowPlayingMessage) {
+                    queue.nowPlayingMessage.delete().catch(() => {});
+                }
+                
                 queue.player.stop();
                 try { queue.connection.destroy(); } catch {}
                 guildQueues.delete(guildId);
@@ -1310,7 +1332,10 @@ function playNextInGuild(guildId) {
 
             if (track.playlistTitle) embed.addFields({ name: "Playlist", value: track.playlistTitle, inline: false });
 
-            q.lastInteractionChannel.send({ embeds: [embed] }).catch(() => {});
+            q.lastInteractionChannel.send({ embeds: [embed] }).then(msg => {
+                // Speichere die "Now Playing" Nachricht für spätere Löschung
+                q.nowPlayingMessage = msg;
+            }).catch(() => {});
         } catch (e) {
             console.warn("[EMBED SEND ERROR]", e.message);
         }
