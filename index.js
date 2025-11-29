@@ -2,7 +2,7 @@
 // Muse — Discord Music Bot (ohne DisTube)
 // Features: async yt-dlp downloads, playlist support, lazy downloads, shuffle, now-playing embeds, progress updates, robust voice join
 
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, EmbedBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, EmbedBuilder, PermissionsBitField } = require("discord.js");
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, NoSubscriberBehavior, AudioPlayerStatus } = require("@discordjs/voice");
 const fs = require("fs");
 const path = require("path");
@@ -627,7 +627,8 @@ const commandBuilders = [
     new SlashCommandBuilder().setName("leave").setDescription("Bot verlässt den Sprachkanal"),
     new SlashCommandBuilder().setName("shuffle").setDescription("Schaltet Shuffle ein/aus"),
     new SlashCommandBuilder().setName("test").setDescription("Spielt test.mp3 im Container"),
-    new SlashCommandBuilder().setName("debug").setDescription("Debug-Informationen anzeigen")
+    new SlashCommandBuilder().setName("debug").setDescription("Debug-Informationen anzeigen"),
+    new SlashCommandBuilder().setName("refresh").setDescription("Commands neu registrieren (Admin only)")
 ];
 
 // --------------------------- Client & Command registration ---------------------------
@@ -641,11 +642,11 @@ client.once("clientReady", async () => {
     const commandsJson = commandBuilders.map(b => b.toJSON());
     
     try {
-        // Registriere sowohl global als auch guild-spezifisch für sofortige Verfügbarkeit
-        await rest.put(Routes.applicationCommands(client.application.id), { body: commandsJson });
-        console.log("[COMMANDS] Registered global commands");
+        // Lösche zuerst alle globalen Commands um Duplikate zu vermeiden
+        await rest.put(Routes.applicationCommands(client.application.id), { body: [] });
+        console.log("[COMMANDS] Cleared global commands to avoid duplicates");
         
-        // Registriere auch für alle Guilds für sofortige Verfügbarkeit
+        // Registriere nur guild-spezifische Commands für sofortige Verfügbarkeit ohne Duplikate
         const guilds = client.guilds.cache;
         for (const [guildId] of guilds) {
             try {
@@ -1037,6 +1038,31 @@ client.on("interactionCreate", async interaction => {
                     .setTimestamp();
                 
                 return interaction.reply({ embeds: [embed] });
+            }
+
+            case "refresh": {
+                // Prüfe Admin-Berechtigung
+                if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+                    return interaction.reply("❌ Nur Administratoren können Commands neu registrieren.");
+                }
+
+                await interaction.deferReply();
+                
+                try {
+                    const rest = new REST({ version: "10" }).setToken(TOKEN);
+                    const commandsJson = commandBuilders.map(b => b.toJSON());
+                    
+                    // Lösche globale Commands
+                    await rest.put(Routes.applicationCommands(client.application.id), { body: [] });
+                    
+                    // Registriere guild-spezifische Commands
+                    await rest.put(Routes.applicationGuildCommands(client.application.id, guildId), { body: commandsJson });
+                    
+                    return interaction.editReply("✅ Commands erfolgreich neu registriert! Duplikate entfernt.");
+                } catch (err) {
+                    console.error("[REFRESH ERROR]", err);
+                    return interaction.editReply("❌ Fehler beim Registrieren der Commands.");
+                }
             }
 
             default:
