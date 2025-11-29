@@ -40,6 +40,13 @@ function sanitizeString(input) {
     return input.replace(/[<>"|&;$`\\]/g, '').trim();
 }
 
+// Prüft, ob eine Interaction noch gültig ist
+function isInteractionValid(interaction) {
+    const interactionAge = Date.now() - interaction.createdTimestamp;
+    const maxAge = 15 * 60 * 1000; // 15 Minuten (Discord Limit)
+    return interactionAge < maxAge;
+}
+
 // Hilfsfunktion für sichere Follow-Up Nachrichten mit Timeout-Prüfung
 async function safeFollowUp(interaction, content, options = {}) {
     try {
@@ -49,6 +56,11 @@ async function safeFollowUp(interaction, content, options = {}) {
         if (!canFollowUp) {
             console.warn("[FOLLOWUP TIMEOUT] Interaction too old for follow-up");
             return null;
+        }
+        
+        // Wenn deferred, verwende editReply für die erste Antwort
+        if (interaction.deferred && !interaction.replied) {
+            return await interaction.editReply(typeof content === 'string' ? { content, ...options } : content);
         }
         
         return await interaction.followUp(typeof content === 'string' ? { content, ...options } : content);
@@ -635,6 +647,12 @@ client.on("interactionCreate", async interaction => {
     try {
         switch (interaction.commandName) {
             case "play": {
+                // Prüfe, ob Interaction noch gültig ist
+                if (!isInteractionValid(interaction)) {
+                    console.log("[INTERACTION EXPIRED] Play command received but interaction is too old");
+                    return; // Beende die Verarbeitung stillschweigend
+                }
+                
                 if (!memberVoice) return interaction.reply({ content: "Du musst in einem Sprachkanal sein!", ephemeral: true });
                 
                 const rawQuery = interaction.options.getString("query", true);
@@ -662,9 +680,21 @@ client.on("interactionCreate", async interaction => {
                     return interaction.reply({ content: `❌ Eingabe zu lang (max. ${MAX_QUERY_LENGTH} Zeichen).`, ephemeral: true });
                 }
                 
-                // Defer reply für längere Operationen
-                await interaction.deferReply();
-                const replyMsg = await interaction.editReply({ content: `🔎 Verarbeite: ${truncateMessage(sanitizedQuery, 100)}` });
+                // Defer reply für längere Operationen - mit Timeout-Prüfung
+                try {
+                    if (!interaction.replied && !interaction.deferred) {
+                        await interaction.deferReply();
+                    }
+                } catch (err) {
+                    console.error("[DEFER ERROR]", err.message);
+                    if (err.code === 10062) {
+                        console.log("[INTERACTION EXPIRED] Cannot defer - interaction token expired");
+                        return; // Beende die Verarbeitung, da Interaction abgelaufen ist
+                    }
+                    throw err; // Andere Fehler weiterwerfen
+                }
+                
+                const replyMsg = await safeFollowUp(interaction, `🔎 Verarbeite: ${truncateMessage(sanitizedQuery, 100)}`);
 
                 // Ensure queue exists or create when needed
                 async function ensureQueueAndJoin() {
@@ -709,16 +739,16 @@ client.on("interactionCreate", async interaction => {
                     } catch (e) {
                         // yt-dlp Fehler mit einzelnen Videos ignorieren, falls möglich
                         console.warn("[PLAYLIST READ ERROR]", e.message);
-                        return interaction.editReply(`⚠️ Playlist konnte nicht vollständig geladen werden: ${e.message}`);
+                        return await safeFollowUp(interaction, `⚠️ Playlist konnte nicht vollständig geladen werden: ${e.message}`);
                     }
 
                     let { playlistTitle, entries } = playlistInfo;
-                    if (!entries || !entries.length) return interaction.editReply("Keine Einträge gefunden.");
+                    if (!entries || !entries.length) return await safeFollowUp(interaction, "Keine Einträge gefunden.");
 
                     // Filter: entferne bereits eindeutig fehlerhafte Videos (z.B. keine URL)
                     entries = entries.filter(e => e.url);
 
-                    if (!entries.length) return interaction.editReply("Keine gültigen Einträge in der Playlist gefunden.");
+                    if (!entries.length) return await safeFollowUp(interaction, "Keine gültigen Einträge in der Playlist gefunden.");
 
                     // erstes Lied sofort abspielen
                     const [firstEntry, ...restEntries] = entries;
@@ -765,10 +795,10 @@ client.on("interactionCreate", async interaction => {
                 if (!isUrl(sanitizedQuery)) {
                     // Zusätzliche Validierung für Suchanfragen
                     if (!validateSearchQuery(sanitizedQuery)) {
-                        return interaction.editReply("❌ Ungültige Suchanfrage. Verwende nur alphanumerische Zeichen und Leerzeichen.");
+                        return await safeFollowUp(interaction, "❌ Ungültige Suchanfrage. Verwende nur alphanumerische Zeichen und Leerzeichen.");
                     }
                     
-                    await interaction.editReply("🔍 Suche nach Videos...");
+                    await safeFollowUp(interaction, "🔍 Suche nach Videos...");
                     console.log(`[SEARCH START] Query: "${sanitizedQuery}"`);
                     
                     let searchResults;
@@ -782,11 +812,11 @@ client.on("interactionCreate", async interaction => {
                         const errorMsg = e.message.includes('timeout') 
                             ? "❌ Suche dauerte zu lange. Versuche einen spezifischeren Suchbegriff."
                             : `❌ Suche fehlgeschlagen: ${e.message}`;
-                        return interaction.editReply(errorMsg);
+                        return await safeFollowUp(interaction, errorMsg);
                     }
 
                     if (!searchResults || searchResults.length === 0) {
-                        return interaction.editReply("❌ Keine Ergebnisse gefunden.");
+                        return await safeFollowUp(interaction, "❌ Keine Ergebnisse gefunden.");
                     }
 
                     // Cache die Suchergebnisse für den Benutzer
@@ -804,19 +834,25 @@ client.on("interactionCreate", async interaction => {
                     
                     resultText += "💡 Verwende `/select <nummer>` um ein Lied auszuwählen (z.B. `/select 1`)";
 
-                    return interaction.editReply(truncateMessage(resultText, 1900));
+                    return await safeFollowUp(interaction, truncateMessage(resultText, 1900));
                 }
 
                 // direct url - bereinige URL von Parametern
                 const cleanUrl = cleanYouTubeUrl(sanitizedQuery);
                 if (!cleanUrl) {
-                    return interaction.editReply("❌ Ungültige YouTube URL.");
+                    return await safeFollowUp(interaction, "❌ Ungültige YouTube URL.");
                 }
                 
                 return await handleSingleUrlPlay(interaction, cleanUrl, replyMsg);
             }
 
             case "select": {
+                // Prüfe, ob Interaction noch gültig ist
+                if (!isInteractionValid(interaction)) {
+                    console.log("[INTERACTION EXPIRED] Select command received but interaction is too old");
+                    return; // Beende die Verarbeitung stillschweigend
+                }
+                
                 const number = interaction.options.getInteger("number");
                 const userId = interaction.user.id;
                 
@@ -842,8 +878,21 @@ client.on("interactionCreate", async interaction => {
                 // Lösche Cache nach Auswahl
                 searchCache.delete(userId);
                 
-                await interaction.deferReply();
-                const replyMsg = await interaction.editReply(`🎵 Spiele: **${selectedResult.title}**`);
+                // Defer reply für längere Operationen - mit Timeout-Prüfung
+                try {
+                    if (!interaction.replied && !interaction.deferred) {
+                        await interaction.deferReply();
+                    }
+                } catch (err) {
+                    console.error("[DEFER ERROR]", err.message);
+                    if (err.code === 10062) {
+                        console.log("[INTERACTION EXPIRED] Cannot defer - interaction token expired");
+                        return; // Beende die Verarbeitung, da Interaction abgelaufen ist
+                    }
+                    throw err; // Andere Fehler weiterwerfen
+                }
+                
+                const replyMsg = await safeFollowUp(interaction, `🎵 Spiele: **${selectedResult.title}**`);
                 
                 return await handleSingleUrlPlay(interaction, selectedResult.url, replyMsg);
             }
