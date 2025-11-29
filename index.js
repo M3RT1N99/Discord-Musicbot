@@ -551,8 +551,13 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
                         raw: str.trim() 
                     };
                     
-                    console.log("[PROGRESS PARSED]", lastProgress);
-                    if (progressCb) progressCb(lastProgress);
+                    console.log("[PROGRESS PARSED] ✅", lastProgress);
+                    if (progressCb) {
+                        console.log("[PROGRESS PARSED] 📞 Calling progressCb with:", lastProgress);
+                        progressCb(lastProgress);
+                    } else {
+                        console.log("[PROGRESS PARSED] ❌ No progressCb function!");
+                    }
                     matched = true;
                     break;
                 }
@@ -560,7 +565,12 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
             
             if (!matched) {
                 // Forward raw lines für Debug
-                if (progressCb) progressCb({ raw: str.trim() });
+                console.log("[PROGRESS PARSED] ❌ No pattern matched, forwarding raw:", str.trim());
+                if (progressCb) {
+                    progressCb({ raw: str.trim() });
+                } else {
+                    console.log("[PROGRESS PARSED] ❌ No progressCb function for raw data!");
+                }
             }
         });
 
@@ -1312,16 +1322,18 @@ if (audioCache.has(url)) {
     // Progress callback (akzeptiert sowohl String als auch Objekt)
     const progressCb = (data) => {
         try {
+            console.log(`[PROGRESS CB] ===== RECEIVED DATA =====`);
+            console.log(`[PROGRESS CB] Type: ${typeof data}, Value:`, data);
             let percent = null;
 
             if (data && typeof data === "object") {
                 // Neues Format von downloadSingleTo
                 if (typeof data.percent === "number") {
                     percent = data.percent;
-                    console.log(`[PROGRESS CB] Received percent: ${percent}%`);
+                    console.log(`[PROGRESS CB] ✅ Direct percent found: ${percent}%`);
                 } else if (typeof data.raw === "string") {
                     // Fallback: Parse aus raw string mit verbesserter Regex
-                    console.log(`[PROGRESS CB] Parsing raw: ${data.raw}`);
+                    console.log(`[PROGRESS CB] 🔍 Parsing raw string: "${data.raw}"`);
                     const patterns = [
                         // Echtes yt-dlp Format: [download]   2.3% of  227.22MiB at  100.00KiB/s ETA 37:53
                         /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+at\s+([\d\.]+\w+\/s)\s+ETA\s+(\d{1,2}:\d{2}(?::\d{2})?)/,
@@ -1333,7 +1345,9 @@ if (audioCache.has(url)) {
                         /(\d{1,3}(?:\.\d+)?)%/
                     ];
                     
-                    for (const pattern of patterns) {
+                    let matched = false;
+                    for (let i = 0; i < patterns.length; i++) {
+                        const pattern = patterns[i];
                         const match = data.raw.match(pattern);
                         if (match) {
                             percent = parseFloat(match[1]);
@@ -1344,9 +1358,14 @@ if (audioCache.has(url)) {
                             if (speed) data.speed = speed;
                             if (eta) data.eta = eta;
                             
-                            console.log(`[PROGRESS CB] Parsed from raw: ${percent}% (speed: ${speed}, eta: ${eta})`);
+                            console.log(`[PROGRESS CB] ✅ Pattern ${i+1} matched: ${percent}% (speed: ${speed}, eta: ${eta})`);
+                            matched = true;
                             break;
                         }
+                    }
+                    
+                    if (!matched) {
+                        console.log(`[PROGRESS CB] ❌ No pattern matched for: "${data.raw}"`);
                     }
                 }
             } else if (typeof data === "string") {
@@ -1359,20 +1378,28 @@ if (audioCache.has(url)) {
             }
 
             if (percent !== null && !isNaN(percent) && percent >= 0 && percent <= 100) {
+                console.log(`[PROGRESS UPDATE] Valid percent: ${percent}%, lastPercent: ${progressCb.lastPercent}`);
                 // Update mit 3% Abstand für mehr Updates, aber immer bei 100%
                 if (!progressCb.lastPercent || percent - progressCb.lastPercent >= 3 || percent === 100) {
                     progressCb.lastPercent = percent;
                     try {
                         const description = `${percent.toFixed(0)}% abgeschlossen${data.speed ? ` (${data.speed})` : ''}${data.eta ? ` ETA: ${data.eta}` : ''}`;
+                        console.log(`[PROGRESS UPDATE] 🔄 Updating Discord message: "${description}"`);
                         progressEmbed.setDescription(description);
-                        progressMsg.edit({ embeds: [progressEmbed] }).catch(()=>{});
+                        progressMsg.edit({ embeds: [progressEmbed] }).then(() => {
+                            console.log(`[PROGRESS UPDATE] ✅ Discord message updated successfully`);
+                        }).catch((err) => {
+                            console.warn(`[PROGRESS UPDATE] ❌ Discord message update failed:`, err.message);
+                        });
                         console.log(`[PROGRESS UPDATE] ${percent.toFixed(1)}% completed`);
                     } catch (e) {
                         console.warn("[PROGRESS UPDATE ERROR]", e.message);
                     }
+                } else {
+                    console.log(`[PROGRESS UPDATE] ⏭️ Skipping update (${percent}% - last: ${progressCb.lastPercent}%)`);
                 }
             } else {
-                console.log(`[PROGRESS DEBUG] Invalid or no percent found. Data:`, data);
+                console.log(`[PROGRESS DEBUG] ❌ Invalid or no percent found. Data:`, data);
             }
         } catch (e) {
             console.warn("[PROGRESS CB ERROR]", e?.message || e);
