@@ -19,12 +19,15 @@ const JOIN_RETRIES = 2; // retry join attempts on failure
 const PROGRESS_EDIT_INTERVAL_MS = 2500; // how often we edit progress message
 
 // --------------------------- Security & Validation ---------------------------
-const ALLOWED_DOMAINS = [
-    'youtube.com',
-    'www.youtube.com',
-    'youtu.be',
-    'm.youtube.com',
-    'music.youtube.com'
+// Gefährliche URL-Patterns die blockiert werden sollen
+const BLOCKED_URL_PATTERNS = [
+    /localhost/i,
+    /127\.0\.0\.1/,
+    /192\.168\./,
+    /10\./,
+    /172\.(1[6-9]|2[0-9]|3[01])\./,
+    /file:\/\//i,
+    /ftp:\/\//i
 ];
 
 const MAX_QUERY_LENGTH = 500;
@@ -42,11 +45,20 @@ function validateUrl(urlString) {
     
     try {
         const url = new URL(urlString);
-        // Nur HTTPS erlauben
-        if (url.protocol !== 'https:') return false;
-        // Nur erlaubte Domains
-        const hostname = url.hostname.toLowerCase();
-        return ALLOWED_DOMAINS.some(domain => hostname === domain || hostname.endsWith('.' + domain));
+        
+        // Nur HTTP/HTTPS erlauben
+        if (!['http:', 'https:'].includes(url.protocol)) return false;
+        
+        // Prüfe auf gefährliche URL-Patterns
+        const fullUrl = urlString.toLowerCase();
+        for (const pattern of BLOCKED_URL_PATTERNS) {
+            if (pattern.test(fullUrl)) return false;
+        }
+        
+        // Prüfe auf gefährliche Zeichen in der URL
+        if (/[<>"|&;$`\\]/.test(urlString)) return false;
+        
+        return true;
     } catch {
         return false;
     }
@@ -66,6 +78,12 @@ function validateSearchQuery(query) {
     return !dangerousPatterns.some(pattern => pattern.test(query));
 }
 
+// Allgemeine URL-Validierung für alle yt-dlp unterstützten Seiten
+function isValidMediaUrl(urlString) {
+    return validateUrl(urlString);
+}
+
+// YouTube-spezifische URL-Validierung (für YouTube-spezifische Funktionen)
 function isValidYouTubeUrl(urlString) {
     if (!validateUrl(urlString)) return false;
     try {
@@ -88,7 +106,7 @@ function isValidYouTubeUrl(urlString) {
 // --------------------------- Utils ---------------------------
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
 function truncateMessage(msg, maxLen = 1950) { if (typeof msg !== "string") msg = String(msg); return msg.length > maxLen ? msg.substring(0, maxLen - 3) + "..." : msg; }
-function isUrl(s) { return validateUrl(s); }
+function isUrl(s) { return isValidMediaUrl(s); }
 function isYouTubePlaylistUrl(u) { 
     try { 
         if (!validateUrl(u)) return false;
@@ -295,7 +313,7 @@ async function getYtdlpInfo(urlOrQuery) {
     
     // Für URLs: strenge Validierung
     if (urlOrQuery.startsWith('http')) {
-        if (!isValidYouTubeUrl(urlOrQuery)) {
+        if (!isValidMediaUrl(urlOrQuery)) {
             throw new Error('Invalid or unsafe URL');
         }
     } 
@@ -339,7 +357,7 @@ async function getPlaylistEntries(playlistUrl) {
 
     // filter: nur gültige URLs und sichere Daten
     const entries = entriesRaw
-        .filter(e => e.webpage_url && isValidYouTubeUrl(e.webpage_url))
+        .filter(e => e.webpage_url && isValidMediaUrl(e.webpage_url))
         .slice(0, 100) // Begrenze Playlist-Größe
         .map(e => ({
             url: e.webpage_url,
@@ -356,7 +374,7 @@ async function getPlaylistEntries(playlistUrl) {
 function downloadSingleTo(filepath, urlOrId, progressCb) {
     return new Promise((resolve, reject) => {
         // Validiere URL
-        if (!isValidYouTubeUrl(urlOrId)) {
+        if (!isValidMediaUrl(urlOrId)) {
             return reject(new Error('Invalid or unsafe URL for download'));
         }
 
@@ -424,7 +442,7 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
 
 async function getVideoInfo(urlOrId) {
     // Validiere URL
-    if (!isValidYouTubeUrl(urlOrId)) {
+    if (!isValidMediaUrl(urlOrId)) {
         throw new Error('Invalid or unsafe URL');
     }
 
@@ -439,16 +457,30 @@ async function getVideoInfo(urlOrId) {
 }
 
 // Suche nach YouTube Videos (bis zu 10 Ergebnisse)
-async function searchYouTubeVideos(query, maxResults = 10) {
+// Allgemeine Suche für alle yt-dlp unterstützten Plattformen
+async function searchVideos(query, maxResults = 10, platform = 'youtube') {
     if (!validateSearchQuery(query)) {
         throw new Error('Invalid search query');
+    }
+
+    let searchQuery;
+    switch (platform.toLowerCase()) {
+        case 'youtube':
+            searchQuery = `ytsearch${maxResults}:${query}`;
+            break;
+        case 'soundcloud':
+            searchQuery = `scsearch${maxResults}:${query}`;
+            break;
+        default:
+            // Allgemeine Suche (primär YouTube)
+            searchQuery = `ytsearch${maxResults}:${query}`;
     }
 
     const args = [
         "-J", 
         "--no-warnings", 
         "--flat-playlist",
-        `ytsearch${maxResults}:${query}`
+        searchQuery
     ];
     
     const { stdout } = await spawnYtdlp(args);
@@ -459,16 +491,27 @@ async function searchYouTubeVideos(query, maxResults = 10) {
     }
     
     return info.entries
-        .filter(entry => entry.id && entry.title)
+        .filter(entry => entry.url && entry.title)
         .slice(0, maxResults)
         .map((entry, index) => ({
             index: index + 1,
-            id: entry.id,
+            id: entry.id || entry.url,
             title: sanitizeString(entry.title),
             duration: entry.duration ? formatDuration(entry.duration) : "unbekannt",
-            url: `https://www.youtube.com/watch?v=${entry.id}`,
-            uploader: sanitizeString(entry.uploader || "Unbekannt")
+            url: entry.url,
+            uploader: sanitizeString(entry.uploader || entry.channel || "Unbekannt"),
+            platform: platform
         }));
+}
+
+// YouTube-spezifische Suchfunktion (für Backward Compatibility)
+async function searchYouTubeVideos(query, maxResults = 10) {
+    const results = await searchVideos(query, maxResults, 'youtube');
+    // Konvertiere zu YouTube-spezifischem Format
+    return results.map(result => ({
+        ...result,
+        url: result.id ? `https://www.youtube.com/watch?v=${result.id}` : result.url
+    }));
 }
 
 // --------------------------- Commands ---------------------------
@@ -850,7 +893,7 @@ client.on("interactionCreate", async interaction => {
 // --------------------------- Handle single URL play (downloads lazily, progress edits) ---------------------------
 async function handleSingleUrlPlay(interaction, url) {
     // Validiere URL
-    if (!isValidYouTubeUrl(url)) {
+    if (!isValidMediaUrl(url)) {
         throw new Error('Ungültige oder unsichere URL');
     }
 

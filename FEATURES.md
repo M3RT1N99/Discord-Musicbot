@@ -1,32 +1,55 @@
-# 🎵 Discord Musicbot - Neue Features
+# 🎵 Discord Musicbot - Erweiterte Features
+
+## 🌐 Unterstützte Plattformen
+
+Der Bot unterstützt jetzt **alle von yt-dlp unterstützten Plattformen**, einschließlich:
+
+### 🎥 **Video-Plattformen**
+- **YouTube** (youtube.com, youtu.be, music.youtube.com)
+- **Vimeo** (vimeo.com)
+- **Twitch** (twitch.tv - Videos und Clips)
+- **TikTok** (tiktok.com)
+- **Instagram** (instagram.com - Videos)
+- **Twitter/X** (twitter.com, x.com - Videos)
+- **Facebook** (facebook.com - Videos)
+
+### 🎵 **Audio-Plattformen**
+- **SoundCloud** (soundcloud.com)
+- **Bandcamp** (bandcamp.com)
+- **Mixcloud** (mixcloud.com)
+
+### 📺 **Streaming-Plattformen**
+- **Dailymotion** (dailymotion.com)
+- **Rumble** (rumble.com)
+- Und **hunderte weitere** Plattformen!
 
 ## 🔍 Erweiterte Suchfunktion
 
-### `/play` Command mit Suchfunktion
+### `/play` Command mit Multi-Platform Support
 Der `/play` Command wurde erweitert und unterstützt jetzt:
 
-#### 1. **YouTube URL Eingabe**
+#### 1. **URL Eingabe (alle Plattformen)**
 ```
 /play https://www.youtube.com/watch?v=lC4GM36D3Xk&list=RDi0EDUaFNSJk&index=4
+/play https://soundcloud.com/artist/track
+/play https://vimeo.com/123456789
+/play https://www.twitch.tv/videos/123456789
 ```
 - URLs mit Parametern werden automatisch bereinigt
-- Nur die Video-ID wird extrahiert
-- Funktioniert mit allen YouTube URL-Formaten:
-  - `youtube.com/watch?v=...`
-  - `youtu.be/...`
-  - `m.youtube.com/watch?v=...`
-  - `music.youtube.com/watch?v=...`
+- Funktioniert mit **allen yt-dlp unterstützten Seiten**
+- Sichere URL-Validierung ohne Domain-Beschränkung
 
 #### 2. **Textsuche mit Auswahlliste**
 ```
 /play Bohemian Rhapsody
 ```
-- Zeigt bis zu **10 Suchergebnisse** an
+- Zeigt bis zu **10 Suchergebnisse** an (primär YouTube)
 - Jedes Ergebnis enthält:
   - **Titel** des Videos
   - **Uploader/Kanal**
   - **Dauer** des Videos
   - **Nummer** für die Auswahl (1-10)
+- Erweiterte Suche für andere Plattformen verfügbar
 
 ### `/select` Command
 ```
@@ -98,12 +121,15 @@ Bot: ❌ Suchergebnisse sind abgelaufen. Verwende /play <suchbegriff> für eine 
 
 ### Neue Funktionen
 - `cleanYouTubeUrl(url)`: Bereinigt URLs von Parametern
-- `searchYouTubeVideos(query, maxResults)`: Sucht nach Videos
+- `searchVideos(query, maxResults, platform)`: Allgemeine Suche für alle Plattformen
+- `searchYouTubeVideos(query, maxResults)`: YouTube-spezifische Suche
+- `isValidMediaUrl(url)`: Validierung für alle yt-dlp unterstützten URLs
 - Search Cache System mit automatischer Bereinigung
 
 ### Sicherheitsmaßnahmen
 - **Input-Validierung**: Alle Eingaben werden validiert
-- **URL-Whitelist**: Nur YouTube-Domains erlaubt
+- **URL-Sicherheit**: Blockiert lokale/private IPs und gefährliche Protokolle
+- **Multi-Platform Support**: Alle yt-dlp Seiten unterstützt
 - **Rate-Limiting**: Schutz vor Spam
 - **Cache-Limits**: Automatische Bereinigung
 
@@ -118,7 +144,8 @@ Bot: ❌ Suchergebnisse sind abgelaufen. Verwende /play <suchbegriff> für eine 
 - **Einfache Suche**: Keine URLs nötig
 - **Auswahl**: Bis zu 10 Optionen
 - **Flexibilität**: URLs und Text funktionieren
-- **Sicherheit**: Nur sichere YouTube-Inhalte
+- **Multi-Platform**: Alle yt-dlp unterstützten Seiten
+- **Sicherheit**: Sichere URL-Validierung
 
 ### Für Administratoren
 - **Sicherheit**: Umfassende Input-Validierung
