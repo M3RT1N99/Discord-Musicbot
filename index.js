@@ -696,7 +696,8 @@ const commandBuilders = [
     new SlashCommandBuilder().setName("shuffle").setDescription("Schaltet Shuffle ein/aus"),
     new SlashCommandBuilder().setName("test").setDescription("Spielt test.mp3 im Container"),
     new SlashCommandBuilder().setName("debug").setDescription("Debug-Informationen anzeigen"),
-    new SlashCommandBuilder().setName("refresh").setDescription("Commands neu registrieren (Admin only)")
+    new SlashCommandBuilder().setName("refresh").setDescription("Commands neu registrieren (Admin only)"),
+    new SlashCommandBuilder().setName("clearcache").setDescription("Cache leeren (Admin only)")
 ];
 
 // --------------------------- Client & Command registration ---------------------------
@@ -1158,6 +1159,52 @@ client.on("interactionCreate", async interaction => {
                 }
             }
 
+            case "clearcache": {
+                // Prüfe Admin-Berechtigung
+                if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+                    return interaction.reply("❌ Nur Administratoren können den Cache leeren.");
+                }
+
+                await interaction.deferReply();
+                
+                try {
+                    const cacheSize = audioCache.cache.size;
+                    const cacheFiles = [...audioCache.cache.values()].map(entry => entry.filepath);
+                    
+                    // Cache leeren
+                    audioCache.cache.clear();
+                    audioCache.save();
+                    
+                    // Versuche Cache-Dateien zu löschen
+                    let deletedFiles = 0;
+                    for (const filepath of cacheFiles) {
+                        try {
+                            if (fs.existsSync(filepath)) {
+                                fs.unlinkSync(filepath);
+                                deletedFiles++;
+                            }
+                        } catch (e) {
+                            console.warn(`[CACHE CLEAR] Could not delete file: ${filepath}`, e.message);
+                        }
+                    }
+                    
+                    // Cache-Index-Datei löschen
+                    try {
+                        if (fs.existsSync(audioCache.indexFile)) {
+                            fs.unlinkSync(audioCache.indexFile);
+                        }
+                    } catch (e) {
+                        console.warn(`[CACHE CLEAR] Could not delete index file`, e.message);
+                    }
+                    
+                    console.log(`[CACHE CLEAR] Cleared ${cacheSize} entries, deleted ${deletedFiles} files`);
+                    return interaction.editReply(`✅ Cache geleert! ${cacheSize} Einträge entfernt, ${deletedFiles} Dateien gelöscht.`);
+                } catch (err) {
+                    console.error("[CACHE CLEAR ERROR]", err);
+                    return interaction.editReply("❌ Fehler beim Leeren des Caches.");
+                }
+            }
+
             default:
                 return interaction.reply("Unbekannter Befehl.");
         }
@@ -1280,7 +1327,16 @@ if (audioCache.has(url)) {
     } else if (!duration) duration = "unbekannt";
 
     queue.songs.push({ requesterId: interaction.user.id, title, filepath, url, duration });
-    await interaction.followUp(`🎵 Aus Cache hinzugefügt: [${title}](${url}) — \`${duration}\``);
+    
+    // Cache-Nachricht mit Embed für bessere Sichtbarkeit
+    const cacheEmbed = new EmbedBuilder()
+        .setTitle("✅ Song aus Cache geladen")
+        .setDescription(`[${title}](${url})`)
+        .addFields({ name: "Dauer", value: duration, inline: true })
+        .setColor(0x00FF00);
+    
+    await interaction.followUp({ embeds: [cacheEmbed] });
+    console.log(`[CACHE HIT] Song loaded from cache: ${title} - NO DOWNLOAD NEEDED`);
 
     if (queue.player.state.status !== AudioPlayerStatus.Playing) 
         await ensureNextTrackDownloadedAndPlay(guildId);
@@ -1289,6 +1345,7 @@ if (audioCache.has(url)) {
 
 
     // Async download with progress embed
+    console.log(`[DOWNLOAD START] Starting fresh download for: ${url}`);
     const tempFilename = `song_${Date.now()}_${randomUUID().slice(0,8)}.m4a`;
     const filepath = path.join(DOWNLOAD_DIR, tempFilename);
 
