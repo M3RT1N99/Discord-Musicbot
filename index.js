@@ -180,6 +180,34 @@ function cleanYouTubeUrl(url) {
         return null;
     }
 }
+
+// Prüft ob es eine echte Playlist ist (nicht Auto-Mix/Radio)
+function isRealPlaylist(url) {
+    try {
+        const urlObj = new URL(url);
+        const listParam = urlObj.searchParams.get('list');
+        
+        if (!listParam) return false;
+        
+        // Auto-Mix/Radio Listen erkennen (beginnen meist mit RD)
+        if (listParam.startsWith('RD')) {
+            console.log(`[PLAYLIST CHECK] Auto-Mix/Radio detected: ${listParam}`);
+            return false;
+        }
+        
+        // Echte Playlists beginnen meist mit PL oder UU
+        if (listParam.startsWith('PL') || listParam.startsWith('UU')) {
+            console.log(`[PLAYLIST CHECK] Real playlist detected: ${listParam}`);
+            return true;
+        }
+        
+        // Andere Playlist-Typen als echt betrachten
+        console.log(`[PLAYLIST CHECK] Other playlist type: ${listParam}`);
+        return true;
+    } catch {
+        return false;
+    }
+}
 function formatDuration(seconds) {
     if (!seconds || isNaN(seconds)) return "unbekannt";
     seconds = Math.floor(Number(seconds));
@@ -793,8 +821,8 @@ client.on("interactionCreate", async interaction => {
                     }
                 }
 
-                // Playlist handling
-                if (isYouTubePlaylistUrl(sanitizedQuery)) {
+                // Playlist handling - nur für echte Playlists
+                if (isYouTubePlaylistUrl(sanitizedQuery) && isRealPlaylist(sanitizedQuery)) {
                     await ensureQueueAndJoin();
 
                     let playlistInfo;
@@ -883,13 +911,7 @@ client.on("interactionCreate", async interaction => {
                         return await safeFollowUp(interaction, "❌ Keine Ergebnisse gefunden.");
                     }
 
-                    // Cache die Suchergebnisse für den Benutzer
-                    searchCache.set(interaction.user.id, {
-                        results: searchResults,
-                        timestamp: Date.now()
-                    });
-
-                    // Erstelle die Ergebnisliste
+                    // Sende Suchergebnisse und speichere Nachricht-Referenz
                     let resultText = "🎵 **Suchergebnisse:**\n\n";
                     searchResults.forEach(result => {
                         resultText += `**${result.index}.** ${result.title}\n`;
@@ -898,13 +920,28 @@ client.on("interactionCreate", async interaction => {
                     
                     resultText += "💡 Verwende `/select <nummer>` um ein Lied auszuwählen (z.B. `/select 1`)";
 
-                    return await safeFollowUp(interaction, truncateMessage(resultText, 1900));
+                    const searchMessage = await safeFollowUp(interaction, truncateMessage(resultText, 1900));
+
+                    // Cache die Suchergebnisse und Nachricht-Referenz für den Benutzer
+                    searchCache.set(interaction.user.id, {
+                        results: searchResults,
+                        timestamp: Date.now(),
+                        messageId: searchMessage?.id,
+                        channelId: interaction.channel?.id
+                    });
+
+                    return searchMessage;
                 }
 
                 // direct url - bereinige URL von Parametern
                 const cleanUrl = cleanYouTubeUrl(sanitizedQuery);
                 if (!cleanUrl) {
                     return await safeFollowUp(interaction, "❌ Ungültige YouTube URL.");
+                }
+                
+                // Prüfe ob es eine URL mit list= Parameter ist, aber als einzelnes Video behandelt werden soll
+                if (isYouTubePlaylistUrl(sanitizedQuery) && !isRealPlaylist(sanitizedQuery)) {
+                    console.log("[URL CLEANUP] Auto-Mix/Radio URL detected, treating as single video");
                 }
                 
                 return await handleSingleUrlPlay(interaction, cleanUrl, replyMsg);
@@ -938,6 +975,22 @@ client.on("interactionCreate", async interaction => {
                 }
                 
                 const selectedResult = cached.results[number - 1];
+                
+                // Lösche die Suchergebnisse-Nachricht
+                if (cached.messageId && cached.channelId) {
+                    try {
+                        const channel = interaction.client.channels.cache.get(cached.channelId);
+                        if (channel) {
+                            const message = await channel.messages.fetch(cached.messageId);
+                            if (message) {
+                                await message.delete();
+                                console.log("[SEARCH CLEANUP] Suchergebnisse-Nachricht gelöscht");
+                            }
+                        }
+                    } catch (error) {
+                        console.warn("[SEARCH CLEANUP] Konnte Suchergebnisse-Nachricht nicht löschen:", error.message);
+                    }
+                }
                 
                 // Lösche Cache nach Auswahl
                 searchCache.delete(userId);
@@ -1177,7 +1230,7 @@ async function handleSingleUrlPlay(interaction, url) {
     }
 
     // Playlist check (nur echte Playlists, kein einzelnes Video in Playlist)
-    if (isYouTubePlaylistUrl(url) && !url.includes("v=")) {
+    if (isYouTubePlaylistUrl(url) && !url.includes("v=") && isRealPlaylist(url)) {
         const { playlistTitle, entries } = await getPlaylistEntries(url);
         for (const e of entries) queue.songs.push({
             requesterId: interaction.user.id,
