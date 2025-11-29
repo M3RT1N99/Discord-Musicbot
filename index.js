@@ -18,11 +18,115 @@ const DOWNLOAD_TIMEOUT_MS = (parseInt(process.env.DOWNLOAD_TIMEOUT_SEC || "120",
 const JOIN_RETRIES = 2; // retry join attempts on failure
 const PROGRESS_EDIT_INTERVAL_MS = 2500; // how often we edit progress message
 
+// --------------------------- Security & Validation ---------------------------
+const ALLOWED_DOMAINS = [
+    'youtube.com',
+    'www.youtube.com',
+    'youtu.be',
+    'm.youtube.com',
+    'music.youtube.com'
+];
+
+const MAX_QUERY_LENGTH = 500;
+const MAX_URL_LENGTH = 2048;
+
+function sanitizeString(input) {
+    if (typeof input !== 'string') return '';
+    // Entferne potentiell gefährliche Zeichen
+    return input.replace(/[<>"|&;$`\\]/g, '').trim();
+}
+
+function validateUrl(urlString) {
+    if (!urlString || typeof urlString !== 'string') return false;
+    if (urlString.length > MAX_URL_LENGTH) return false;
+    
+    try {
+        const url = new URL(urlString);
+        // Nur HTTPS erlauben
+        if (url.protocol !== 'https:') return false;
+        // Nur erlaubte Domains
+        const hostname = url.hostname.toLowerCase();
+        return ALLOWED_DOMAINS.some(domain => hostname === domain || hostname.endsWith('.' + domain));
+    } catch {
+        return false;
+    }
+}
+
+function validateSearchQuery(query) {
+    if (!query || typeof query !== 'string') return false;
+    if (query.length > MAX_QUERY_LENGTH) return false;
+    // Verhindere Command Injection Versuche
+    const dangerousPatterns = [
+        /[;&|`$(){}[\]]/,  // Shell metacharacters
+        /\.\./,            // Directory traversal
+        /^-/,              // Command flags
+        /\x00/,            // Null bytes
+        /[\r\n]/           // Line breaks
+    ];
+    return !dangerousPatterns.some(pattern => pattern.test(query));
+}
+
+function isValidYouTubeUrl(urlString) {
+    if (!validateUrl(urlString)) return false;
+    try {
+        const url = new URL(urlString);
+        const hostname = url.hostname.toLowerCase();
+        
+        // YouTube Video URL patterns
+        if (hostname.includes('youtube.com')) {
+            return url.searchParams.has('v') || url.pathname.includes('/watch');
+        }
+        if (hostname === 'youtu.be') {
+            return url.pathname.length > 1;
+        }
+        return false;
+    } catch {
+        return false;
+    }
+}
+
 // --------------------------- Utils ---------------------------
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
 function truncateMessage(msg, maxLen = 1950) { if (typeof msg !== "string") msg = String(msg); return msg.length > maxLen ? msg.substring(0, maxLen - 3) + "..." : msg; }
-function isUrl(s) { try { new URL(s); return true; } catch { return false; } }
-function isYouTubePlaylistUrl(u) { try { if (!u) return false; const url = new URL(u); return url.searchParams.has("list"); } catch { return false; } }
+function isUrl(s) { return validateUrl(s); }
+function isYouTubePlaylistUrl(u) { 
+    try { 
+        if (!validateUrl(u)) return false;
+        const url = new URL(u); 
+        return url.searchParams.has("list"); 
+    } catch { 
+        return false; 
+    } 
+}
+
+// Extrahiert saubere YouTube URL ohne Parameter
+function cleanYouTubeUrl(url) {
+    if (!isValidYouTubeUrl(url)) return null;
+    
+    try {
+        const urlObj = new URL(url);
+        
+        // Für youtu.be Links
+        if (urlObj.hostname === 'youtu.be') {
+            const videoId = urlObj.pathname.substring(1);
+            if (videoId && /^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+                return `https://www.youtube.com/watch?v=${videoId}`;
+            }
+        }
+        
+        // Für youtube.com Links
+        if (urlObj.hostname.includes('youtube.com')) {
+            const videoId = urlObj.searchParams.get('v');
+            if (videoId && /^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+                return `https://www.youtube.com/watch?v=${videoId}`;
+            }
+        }
+        
+        return null;
+    } catch {
+        return null;
+    }
+}
 function formatDuration(seconds) {
     if (!seconds || isNaN(seconds)) return "unbekannt";
     seconds = Math.floor(Number(seconds));
@@ -116,6 +220,32 @@ class AudioCache {
 }
 const audioCache = new AudioCache(MAX_CACHE);
 
+// --------------------------- Rate Limiting ---------------------------
+const downloadLimiter = new Map(); // userId -> { count, resetTime }
+const MAX_DOWNLOADS_PER_USER = 10;
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 Minute
+
+// --------------------------- Search Cache ---------------------------
+const searchCache = new Map(); // userId -> { results: [], timestamp }
+const SEARCH_CACHE_TIMEOUT = 5 * 60 * 1000; // 5 Minuten
+
+function checkRateLimit(userId) {
+    const now = Date.now();
+    const userLimit = downloadLimiter.get(userId);
+    
+    if (!userLimit || now > userLimit.resetTime) {
+        downloadLimiter.set(userId, { count: 1, resetTime: now + RATE_LIMIT_WINDOW_MS });
+        return true;
+    }
+    
+    if (userLimit.count >= MAX_DOWNLOADS_PER_USER) {
+        return false;
+    }
+    
+    userLimit.count++;
+    return true;
+}
+
 // --------------------------- Guild Queue System ---------------------------
 // guildQueues: Map<guildId, { connection, player, songs: [track], volume, shuffle, lastInteractionChannel }>
 const guildQueues = new Map();
@@ -133,7 +263,20 @@ function createPlayerForGuild(gid, connection) {
 // --------------------------- yt-dlp helpers ---------------------------
 function spawnYtdlp(args, opts = {}) {
     return new Promise((resolve, reject) => {
-        const proc = spawn(YTDLP_BIN, args, { ...opts, stdio: ["ignore","pipe","pipe"] });
+        // Validiere alle Argumente
+        const safeArgs = args.filter(arg => {
+            if (typeof arg !== 'string') return false;
+            // Verhindere gefährliche Flags
+            if (arg.startsWith('--exec') || arg.startsWith('--command')) return false;
+            if (arg.includes('..') || arg.includes('\x00')) return false;
+            return true;
+        });
+
+        const proc = spawn(YTDLP_BIN, safeArgs, { 
+            ...opts, 
+            stdio: ["ignore","pipe","pipe"],
+            shell: false // Verhindere Shell-Injection
+        });
         let stdout = "", stderr = "";
         proc.stdout.on("data", d => { stdout += d.toString(); });
         proc.stderr.on("data", d => { stderr += d.toString(); });
@@ -145,6 +288,28 @@ function spawnYtdlp(args, opts = {}) {
 
 // Get info JSON for url or search query. Accepts "ytsearch1:..." style query too.
 async function getYtdlpInfo(urlOrQuery) {
+    // Validiere Input
+    if (typeof urlOrQuery !== 'string') {
+        throw new Error('Invalid input: must be string');
+    }
+    
+    // Für URLs: strenge Validierung
+    if (urlOrQuery.startsWith('http')) {
+        if (!isValidYouTubeUrl(urlOrQuery)) {
+            throw new Error('Invalid or unsafe URL');
+        }
+    } 
+    // Für Suchanfragen: ytsearch1: prefix validieren
+    else if (urlOrQuery.startsWith('ytsearch1:')) {
+        const query = urlOrQuery.substring(10);
+        if (!validateSearchQuery(query)) {
+            throw new Error('Invalid search query');
+        }
+    } 
+    else {
+        throw new Error('Input must be valid URL or ytsearch1: query');
+    }
+
     // use -J to get JSON
     const args = ["-J", "--no-warnings", "--socket-timeout", "60", urlOrQuery];
     const { stdout } = await spawnYtdlp(args);
@@ -153,6 +318,11 @@ async function getYtdlpInfo(urlOrQuery) {
 
 // get playlist entries (full info so we can get durations and thumbnails)
 async function getPlaylistEntries(playlistUrl) {
+    // Validiere Playlist URL
+    if (!isYouTubePlaylistUrl(playlistUrl)) {
+        throw new Error('Invalid playlist URL');
+    }
+
     // -J liefert JSON; --ignore-errors ignoriert gesperrte Videos
     const args = [
         "-J",
@@ -164,15 +334,16 @@ async function getPlaylistEntries(playlistUrl) {
     ];
     const { stdout } = await spawnYtdlp(args);
     const json = JSON.parse(stdout);
-    const playlistTitle = json.title || json.playlist_title || "Playlist";
+    const playlistTitle = sanitizeString(json.title || json.playlist_title || "Playlist");
     const entriesRaw = json.entries || [];
 
-    // filter: nur gültige URLs
+    // filter: nur gültige URLs und sichere Daten
     const entries = entriesRaw
-        .filter(e => e.webpage_url) 
+        .filter(e => e.webpage_url && isValidYouTubeUrl(e.webpage_url))
+        .slice(0, 100) // Begrenze Playlist-Größe
         .map(e => ({
             url: e.webpage_url,
-            title: e.title || e.id || "Unbekannt",
+            title: sanitizeString(e.title || e.id || "Unbekannt"),
             duration: e.duration || null,
             thumbnail: (e.thumbnails && e.thumbnails.length) ? e.thumbnails[e.thumbnails.length-1].url : null
         }));
@@ -184,6 +355,23 @@ async function getPlaylistEntries(playlistUrl) {
 // progressCb receives an object { percent, downloaded, eta, speed, raw } when parsed
 function downloadSingleTo(filepath, urlOrId, progressCb) {
     return new Promise((resolve, reject) => {
+        // Validiere URL
+        if (!isValidYouTubeUrl(urlOrId)) {
+            return reject(new Error('Invalid or unsafe URL for download'));
+        }
+
+        // Validiere Filepath
+        if (!filepath || typeof filepath !== 'string') {
+            return reject(new Error('Invalid filepath'));
+        }
+
+        // Stelle sicher, dass filepath im erlaubten Verzeichnis ist
+        const normalizedPath = path.normalize(filepath);
+        const normalizedDownloadDir = path.normalize(DOWNLOAD_DIR);
+        if (!normalizedPath.startsWith(normalizedDownloadDir)) {
+            return reject(new Error('Filepath outside allowed directory'));
+        }
+
         ensureDir(DOWNLOAD_DIR);
         const args = [
             "-f", "bestaudio",
@@ -197,7 +385,7 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
             "-o", filepath,
             urlOrId
         ];
-        const proc = spawn(YTDLP_BIN, args);
+        const proc = spawn(YTDLP_BIN, args, { shell: false });
         let stderr = "";
         let lastProgress = null;
 
@@ -235,14 +423,52 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
 }
 
 async function getVideoInfo(urlOrId) {
+    // Validiere URL
+    if (!isValidYouTubeUrl(urlOrId)) {
+        throw new Error('Invalid or unsafe URL');
+    }
+
     const args = ["-J", "--no-warnings", urlOrId];
     const { stdout } = await spawnYtdlp(args);
     const info = JSON.parse(stdout);
     return {
-        title: info.title,
+        title: sanitizeString(info.title || "Unbekannt"),
         duration: info.duration ? formatDuration(info.duration) : "unbekannt",
         url: info.webpage_url || info.url
     };
+}
+
+// Suche nach YouTube Videos (bis zu 10 Ergebnisse)
+async function searchYouTubeVideos(query, maxResults = 10) {
+    if (!validateSearchQuery(query)) {
+        throw new Error('Invalid search query');
+    }
+
+    const args = [
+        "-J", 
+        "--no-warnings", 
+        "--flat-playlist",
+        `ytsearch${maxResults}:${query}`
+    ];
+    
+    const { stdout } = await spawnYtdlp(args);
+    const info = JSON.parse(stdout);
+    
+    if (!info.entries || !Array.isArray(info.entries)) {
+        return [];
+    }
+    
+    return info.entries
+        .filter(entry => entry.id && entry.title)
+        .slice(0, maxResults)
+        .map((entry, index) => ({
+            index: index + 1,
+            id: entry.id,
+            title: sanitizeString(entry.title),
+            duration: entry.duration ? formatDuration(entry.duration) : "unbekannt",
+            url: `https://www.youtube.com/watch?v=${entry.id}`,
+            uploader: sanitizeString(entry.uploader || "Unbekannt")
+        }));
 }
 
 // --------------------------- Commands ---------------------------
@@ -251,6 +477,11 @@ const commandBuilders = [
         .setName("play")
         .setDescription("Spielt einen Song, Link oder Suchbegriff")
         .addStringOption(opt => opt.setName("query").setDescription("YouTube-Link oder Suchbegriff").setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName("select")
+        .setDescription("Wähle ein Lied aus den Suchergebnissen")
+        .addIntegerOption(option => option.setName("number").setDescription("Nummer des Liedes (1-10)").setRequired(true).setMinValue(1).setMaxValue(10)),
 
     new SlashCommandBuilder().setName("pause").setDescription("Pausiert die Wiedergabe"),
     new SlashCommandBuilder().setName("resume").setDescription("Setzt die Wiedergabe fort"),
@@ -294,9 +525,34 @@ client.on("interactionCreate", async interaction => {
         switch (interaction.commandName) {
             case "play": {
                 if (!memberVoice) return interaction.reply({ content: "Du musst in einem Sprachkanal sein!", ephemeral: true });
+                
                 const rawQuery = interaction.options.getString("query", true);
+                
+                // Rate-Limiting prüfen
+                if (!checkRateLimit(interaction.user.id)) {
+                    return interaction.reply({ 
+                        content: "⚠️ Du hast zu viele Downloads angefragt. Warte eine Minute und versuche es erneut.", 
+                        ephemeral: true 
+                    });
+                }
+                
+                // Input-Validierung
+                if (!rawQuery || typeof rawQuery !== 'string') {
+                    return interaction.reply({ content: "❌ Ungültige Eingabe.", ephemeral: true });
+                }
+                
+                const sanitizedQuery = sanitizeString(rawQuery);
+                if (!sanitizedQuery) {
+                    return interaction.reply({ content: "❌ Eingabe enthält ungültige Zeichen.", ephemeral: true });
+                }
+                
+                // Längen-Validierung
+                if (sanitizedQuery.length > MAX_QUERY_LENGTH) {
+                    return interaction.reply({ content: `❌ Eingabe zu lang (max. ${MAX_QUERY_LENGTH} Zeichen).`, ephemeral: true });
+                }
+                
                 // initial reply and keep message to edit progress
-                await interaction.reply({ content: `🔎 Verarbeite: ${truncateMessage(rawQuery, 100)}`, withResponse: true });
+                await interaction.reply({ content: `🔎 Verarbeite: ${truncateMessage(sanitizedQuery, 100)}`, withResponse: true });
                 const replyMsg = await interaction.fetchReply(); // holt die Message danach
 
                 // Ensure queue exists or create when needed
@@ -333,12 +589,12 @@ client.on("interactionCreate", async interaction => {
                 }
 
                 // Playlist handling
-                if (isYouTubePlaylistUrl(rawQuery)) {
+                if (isYouTubePlaylistUrl(sanitizedQuery)) {
                     await ensureQueueAndJoin();
 
                     let playlistInfo;
                     try {
-                        playlistInfo = await getPlaylistEntries(rawQuery);
+                        playlistInfo = await getPlaylistEntries(sanitizedQuery);
                     } catch (e) {
                         // yt-dlp Fehler mit einzelnen Videos ignorieren, falls möglich
                         console.warn("[PLAYLIST READ ERROR]", e.message);
@@ -394,24 +650,84 @@ client.on("interactionCreate", async interaction => {
                 }
 
 
-                // If not URL => treat as search (ytsearch1:)
-                if (!isUrl(rawQuery)) {
-                    let info;
+                // If not URL => treat as search
+                if (!isUrl(sanitizedQuery)) {
+                    // Zusätzliche Validierung für Suchanfragen
+                    if (!validateSearchQuery(sanitizedQuery)) {
+                        return interaction.editReply("❌ Ungültige Suchanfrage. Verwende nur alphanumerische Zeichen und Leerzeichen.");
+                    }
+                    
+                    await interaction.editReply("🔍 Suche nach Videos...");
+                    
+                    let searchResults;
                     try {
-                        info = await getYtdlpInfo(`ytsearch1:${rawQuery}`);
+                        searchResults = await searchYouTubeVideos(sanitizedQuery, 10);
                     } catch (e) {
-                        console.warn("[YTDLP SEARCH ERROR]", e?.message || e);
+                        console.warn("[YOUTUBE SEARCH ERROR]", e?.message || e);
                         return interaction.editReply(`❌ Suche fehlgeschlagen: ${e.message}`);
                     }
-                    // info may be a search result => pick first
-                    const videoUrl = info?.entries ? info.entries[0]?.webpage_url || info.entries[0]?.url : info?.webpage_url || info?.url;
-                    if (!videoUrl) return interaction.editReply("Keine Ergebnisse gefunden.");
-                    // continue as URL
-                    return await handleSingleUrlPlay(interaction, videoUrl, replyMsg);
+
+                    if (!searchResults || searchResults.length === 0) {
+                        return interaction.editReply("❌ Keine Ergebnisse gefunden.");
+                    }
+
+                    // Cache die Suchergebnisse für den Benutzer
+                    searchCache.set(interaction.user.id, {
+                        results: searchResults,
+                        timestamp: Date.now()
+                    });
+
+                    // Erstelle die Ergebnisliste
+                    let resultText = "🎵 **Suchergebnisse:**\n\n";
+                    searchResults.forEach(result => {
+                        resultText += `**${result.index}.** ${result.title}\n`;
+                        resultText += `   👤 ${result.uploader} | ⏱️ ${result.duration}\n\n`;
+                    });
+                    
+                    resultText += "💡 Verwende `/select <nummer>` um ein Lied auszuwählen (z.B. `/select 1`)";
+
+                    return interaction.editReply(truncateMessage(resultText, 1900));
                 }
 
-                // direct url
-                return await handleSingleUrlPlay(interaction, rawQuery, replyMsg);
+                // direct url - bereinige URL von Parametern
+                const cleanUrl = cleanYouTubeUrl(sanitizedQuery);
+                if (!cleanUrl) {
+                    return interaction.editReply("❌ Ungültige YouTube URL.");
+                }
+                
+                return await handleSingleUrlPlay(interaction, cleanUrl, replyMsg);
+            }
+
+            case "select": {
+                const number = interaction.options.getInteger("number");
+                const userId = interaction.user.id;
+                
+                // Prüfe ob Suchergebnisse im Cache vorhanden sind
+                const cached = searchCache.get(userId);
+                if (!cached) {
+                    return interaction.reply("❌ Keine Suchergebnisse gefunden. Verwende zuerst `/play <suchbegriff>`.");
+                }
+                
+                // Prüfe ob Cache noch gültig ist
+                if (Date.now() - cached.timestamp > SEARCH_CACHE_TIMEOUT) {
+                    searchCache.delete(userId);
+                    return interaction.reply("❌ Suchergebnisse sind abgelaufen. Verwende `/play <suchbegriff>` für eine neue Suche.");
+                }
+                
+                // Prüfe ob die Nummer gültig ist
+                if (number < 1 || number > cached.results.length) {
+                    return interaction.reply(`❌ Ungültige Nummer. Wähle zwischen 1 und ${cached.results.length}.`);
+                }
+                
+                const selectedResult = cached.results[number - 1];
+                
+                // Lösche Cache nach Auswahl
+                searchCache.delete(userId);
+                
+                await interaction.deferReply();
+                const replyMsg = await interaction.editReply(`🎵 Spiele: **${selectedResult.title}**`);
+                
+                return await handleSingleUrlPlay(interaction, selectedResult.url, replyMsg);
             }
 
             case "pause": {
@@ -494,17 +810,57 @@ client.on("interactionCreate", async interaction => {
         }
     } catch (err) {
         console.error("[INTERACTION ERROR]", err);
+        
+        // Sichere Error-Behandlung
+        const errorMessage = err && err.message ? err.message : 'Unbekannter Fehler';
+        const safeErrorMessage = sanitizeString(errorMessage);
+        
         try {
-            if (!interaction.replied) await interaction.reply(truncateMessage(`Fehler: ${err.message}`));
-            else await interaction.followUp(truncateMessage(`Fehler: ${err.message}`));
-        } catch {}
+            if (!interaction.replied && !interaction.deferred) {
+                await interaction.reply({ 
+                    content: truncateMessage(`❌ Fehler: ${safeErrorMessage}`), 
+                    ephemeral: true 
+                });
+            } else {
+                await interaction.followUp({ 
+                    content: truncateMessage(`❌ Fehler: ${safeErrorMessage}`), 
+                    ephemeral: true 
+                });
+            }
+        } catch (replyError) {
+            console.error("[ERROR REPLY FAILED]", replyError);
+        }
+        
+        // Bei kritischen Fehlern: Queue cleanup
+        if (err.message && err.message.includes('voice') || err.message.includes('connection')) {
+            try {
+                const queue = guildQueues.get(guildId);
+                if (queue) {
+                    queue.player.stop();
+                    queue.connection.destroy();
+                    guildQueues.delete(guildId);
+                }
+            } catch (cleanupError) {
+                console.error("[CLEANUP ERROR]", cleanupError);
+            }
+        }
     }
 });
 
 // --------------------------- Handle single URL play (downloads lazily, progress edits) ---------------------------
 async function handleSingleUrlPlay(interaction, url) {
+    // Validiere URL
+    if (!isValidYouTubeUrl(url)) {
+        throw new Error('Ungültige oder unsichere URL');
+    }
+
     const guildId = interaction.guildId;
     const memberVoice = interaction.member.voice.channel;
+    
+    if (!memberVoice) {
+        throw new Error('Du musst in einem Sprachkanal sein');
+    }
+    
     let queue = guildQueues.get(guildId);
 
     // Ensure queue exists
