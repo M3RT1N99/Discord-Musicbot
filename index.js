@@ -626,7 +626,8 @@ const commandBuilders = [
         .addIntegerOption(opt => opt.setName("wert").setDescription("0-100").setRequired(true)),
     new SlashCommandBuilder().setName("leave").setDescription("Bot verlässt den Sprachkanal"),
     new SlashCommandBuilder().setName("shuffle").setDescription("Schaltet Shuffle ein/aus"),
-    new SlashCommandBuilder().setName("test").setDescription("Spielt test.mp3 im Container")
+    new SlashCommandBuilder().setName("test").setDescription("Spielt test.mp3 im Container"),
+    new SlashCommandBuilder().setName("debug").setDescription("Debug-Informationen anzeigen")
 ];
 
 // --------------------------- Client & Command registration ---------------------------
@@ -638,11 +639,38 @@ client.once("clientReady", async () => {
     console.log(`Logged in as ${client.user.tag}`);
     const rest = new REST({ version: "10" }).setToken(TOKEN);
     const commandsJson = commandBuilders.map(b => b.toJSON());
+    
     try {
+        // Registriere sowohl global als auch guild-spezifisch für sofortige Verfügbarkeit
         await rest.put(Routes.applicationCommands(client.application.id), { body: commandsJson });
         console.log("[COMMANDS] Registered global commands");
+        
+        // Registriere auch für alle Guilds für sofortige Verfügbarkeit
+        const guilds = client.guilds.cache;
+        for (const [guildId] of guilds) {
+            try {
+                await rest.put(Routes.applicationGuildCommands(client.application.id, guildId), { body: commandsJson });
+                console.log(`[COMMANDS] Registered commands for guild ${guildId}`);
+            } catch (guildErr) {
+                console.warn(`[COMMANDS] Failed to register for guild ${guildId}:`, guildErr?.message);
+            }
+        }
     } catch (err) {
         console.error("[COMMANDS] Register failed:", err?.message || err);
+    }
+});
+
+// Registriere Commands wenn Bot zu neuem Server hinzugefügt wird
+client.on("guildCreate", async (guild) => {
+    console.log(`[GUILD JOIN] Joined guild: ${guild.name} (${guild.id})`);
+    const rest = new REST({ version: "10" }).setToken(TOKEN);
+    const commandsJson = commandBuilders.map(b => b.toJSON());
+    
+    try {
+        await rest.put(Routes.applicationGuildCommands(client.application.id, guild.id), { body: commandsJson });
+        console.log(`[COMMANDS] Registered commands for new guild ${guild.id}`);
+    } catch (err) {
+        console.warn(`[COMMANDS] Failed to register for new guild ${guild.id}:`, err?.message);
     }
 });
 
@@ -992,6 +1020,23 @@ client.on("interactionCreate", async interaction => {
                 const res = createAudioResource("/app/test.mp3");
                 player.play(res);
                 return interaction.reply("🎧 Test-Audio wird abgespielt!");
+            }
+
+            case "debug": {
+                const embed = new EmbedBuilder()
+                    .setTitle("🔧 Debug-Informationen")
+                    .setColor(0x00ff00)
+                    .addFields(
+                        { name: "Bot Status", value: "✅ Online", inline: true },
+                        { name: "Guild ID", value: guildId || "Unbekannt", inline: true },
+                        { name: "Commands", value: commandBuilders.map(c => `/${c.name}`).join(", "), inline: false },
+                        { name: "Voice Channel", value: memberVoice ? `${memberVoice.name} (${memberVoice.id})` : "Nicht verbunden", inline: false },
+                        { name: "Queue Status", value: queue ? `${queue.songs.length} Songs` : "Keine Queue", inline: true },
+                        { name: "Bot Version", value: "Enhanced Search & URL Parsing", inline: true }
+                    )
+                    .setTimestamp();
+                
+                return interaction.reply({ embeds: [embed] });
             }
 
             default:
