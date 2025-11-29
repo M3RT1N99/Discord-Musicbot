@@ -516,19 +516,23 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
             const str = d.toString();
             stderr += str;
             
-            // Debug: Log alle stderr Zeilen um Progress-Format zu verstehen
-            console.log("[DOWNLOAD DEBUG]", str.trim());
+            // Debug: Log nur Progress-relevante Zeilen
+            if (str.includes('[download]') || str.includes('%')) {
+                console.log("[DOWNLOAD DEBUG]", str.trim());
+            }
             
-            // Verbesserte Regex-Pattern für verschiedene yt-dlp Progress-Formate:
-            // [download]  12.3% of 3.45MiB at 123.45KiB/s ETA 00:12
-            // [download] 100% of 3.45MiB in 00:12
+            // Verbesserte Regex-Pattern für echte yt-dlp Progress-Formate:
+            // [download]   2.3% of  227.22MiB at  100.00KiB/s ETA 37:53
+            // [download] 100% of  227.22MiB in 00:00:05 at 40.63MiB/s
             // [download]   0.1% of ~  3.45MiB at  123.45KiB/s ETA 00:12
             const patterns = [
-                // Vollständiges Format mit Speed und ETA
-                /\[download\]\s*(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+at\s+([\d\.]+\w+\/s)\s+ETA\s+(\d{2}:\d{2}(?::\d{2})?)/,
-                // Format ohne Speed/ETA (z.B. bei 100%)
-                /\[download\]\s*(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+/,
-                // Einfaches Prozent-Format
+                // Vollständiges Format mit Speed und ETA: [download]   2.3% of  227.22MiB at  100.00KiB/s ETA 37:53
+                /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+at\s+([\d\.]+\w+\/s)\s+ETA\s+(\d{1,2}:\d{2}(?::\d{2})?)/,
+                // Format mit "in" statt ETA: [download] 100% of  227.22MiB in 00:00:05 at 40.63MiB/s
+                /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+in\s+\d{1,2}:\d{2}(?::\d{2})?\s+at\s+([\d\.]+\w+\/s)/,
+                // Format ohne Speed/ETA: [download] 100% of  227.22MiB
+                /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+/,
+                // Einfaches Prozent-Format als Fallback
                 /(\d{1,3}(?:\.\d+)?)%/
             ];
             
@@ -1319,7 +1323,13 @@ if (audioCache.has(url)) {
                     // Fallback: Parse aus raw string mit verbesserter Regex
                     console.log(`[PROGRESS CB] Parsing raw: ${data.raw}`);
                     const patterns = [
-                        /\[download\]\s*(\d{1,3}(?:\.\d+)?)%/,
+                        // Echtes yt-dlp Format: [download]   2.3% of  227.22MiB at  100.00KiB/s ETA 37:53
+                        /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+at\s+([\d\.]+\w+\/s)\s+ETA\s+(\d{1,2}:\d{2}(?::\d{2})?)/,
+                        // Format mit "in": [download] 100% of  227.22MiB in 00:00:05 at 40.63MiB/s
+                        /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+in\s+\d{1,2}:\d{2}(?::\d{2})?\s+at\s+([\d\.]+\w+\/s)/,
+                        // Einfaches Format: [download] 100% of  227.22MiB
+                        /\[download\]\s+(\d{1,3}(?:\.\d+)?)%/,
+                        // Fallback
                         /(\d{1,3}(?:\.\d+)?)%/
                     ];
                     
@@ -1327,7 +1337,14 @@ if (audioCache.has(url)) {
                         const match = data.raw.match(pattern);
                         if (match) {
                             percent = parseFloat(match[1]);
-                            console.log(`[PROGRESS CB] Parsed percent from raw: ${percent}%`);
+                            const speed = match[2] || null;
+                            const eta = match[3] || null;
+                            
+                            // Update data object mit extrahierten Werten
+                            if (speed) data.speed = speed;
+                            if (eta) data.eta = eta;
+                            
+                            console.log(`[PROGRESS CB] Parsed from raw: ${percent}% (speed: ${speed}, eta: ${eta})`);
                             break;
                         }
                     }
@@ -1342,8 +1359,8 @@ if (audioCache.has(url)) {
             }
 
             if (percent !== null && !isNaN(percent) && percent >= 0 && percent <= 100) {
-                // Update mit 5% Abstand für weniger Spam, aber immer bei 100%
-                if (!progressCb.lastPercent || percent - progressCb.lastPercent >= 5 || percent === 100) {
+                // Update mit 3% Abstand für mehr Updates, aber immer bei 100%
+                if (!progressCb.lastPercent || percent - progressCb.lastPercent >= 3 || percent === 100) {
                     progressCb.lastPercent = percent;
                     try {
                         const description = `${percent.toFixed(0)}% abgeschlossen${data.speed ? ` (${data.speed})` : ''}${data.eta ? ` ETA: ${data.eta}` : ''}`;
