@@ -1054,13 +1054,21 @@ if (audioCache.has(url)) {
         return await safeFollowUp(interaction, `❌ Konnte Video-Info nicht abrufen: ${err.message}`);
     }
 
-    // Initial embed
+    // Sammle alle Nachrichten für späteres Löschen
+    const downloadMessages = [];
+
+    // Erste Nachricht: Download gestartet
+    const startMsg = await interaction.followUp("⬇️ Download gestartet, ich informiere dich, wenn das Lied bereit ist.");
+    downloadMessages.push(startMsg);
+
+    // Progress embed
     let progressEmbed = new EmbedBuilder()
         .setTitle("⬇️ Download läuft...")
         .setDescription(`0% abgeschlossen`)
         .setColor(0x1DB954);
 
     let progressMsg = await interaction.followUp({ embeds: [progressEmbed] });
+    downloadMessages.push(progressMsg);
     
 
     // Progress callback every 5%
@@ -1085,14 +1093,19 @@ if (audioCache.has(url)) {
             }
 
             if (percent !== null && !isNaN(percent)) {
-                // update bereits abstand-basiert (1% für feineres Feedback)
+                // update bereits abstand-basiert (5% für weniger Spam)
                 if (!progressCb.lastPercent || percent - progressCb.lastPercent >= 5) {
                     progressCb.lastPercent = percent;
                     try {
-                        progressEmbed.setDescription(`⬇️ ${percent.toFixed(0)}% abgeschlossen`);
+                        progressEmbed.setDescription(`${percent.toFixed(0)}% abgeschlossen`);
                         progressMsg.edit({ embeds: [progressEmbed] }).catch(()=>{});
-                    } catch (e) { /* ignore message edit errors */ }
+                        console.log(`[PROGRESS] ${percent.toFixed(1)}% completed`);
+                    } catch (e) { 
+                        console.warn("[PROGRESS UPDATE ERROR]", e.message);
+                    }
                 }
+            } else {
+                console.log(`[PROGRESS DEBUG] No valid percent found in:`, data);
             }
         } catch (e) {
             // safe-ignore parsing problems
@@ -1108,8 +1121,6 @@ if (audioCache.has(url)) {
             return { filepath };
         });
 
-    await interaction.followUp("⬇️ Download gestartet, ich informiere dich, wenn das Lied bereit ist.");
-
     downloadPromise.then(async ({ filepath: fp }) => {
         queue.songs.push({
             requesterId: interaction.user.id,
@@ -1118,11 +1129,40 @@ if (audioCache.has(url)) {
             url,
             duration: video.duration
         });
-        await safeFollowUp(interaction, `✅ Download fertig: **${video.title}** — zur Queue hinzugefügt.`);
+        const finishMsg = await safeFollowUp(interaction, `✅ Download fertig: **${video.title}** — zur Queue hinzugefügt.`);
+        downloadMessages.push(finishMsg);
+        
+        // Lösche alle Download-Nachrichten nach 1 Minute
+        setTimeout(async () => {
+            for (const msg of downloadMessages) {
+                try {
+                    if (msg && msg.delete) {
+                        await msg.delete();
+                    }
+                } catch (e) {
+                    // Ignoriere Fehler beim Löschen (z.B. Nachricht bereits gelöscht)
+                }
+            }
+        }, 60000); // 60 Sekunden
+        
         if (queue.player.state.status !== AudioPlayerStatus.Playing) await ensureNextTrackDownloadedAndPlay(guildId);
     }).catch(async (err) => {
         console.error("[DOWNLOAD ERROR]", err.message);
-        await safeFollowUp(interaction, `❌ Download fehlgeschlagen: ${err.message}`);
+        const errorMsg = await safeFollowUp(interaction, `❌ Download fehlgeschlagen: ${err.message}`);
+        downloadMessages.push(errorMsg);
+        
+        // Lösche auch bei Fehlern nach 1 Minute
+        setTimeout(async () => {
+            for (const msg of downloadMessages) {
+                try {
+                    if (msg && msg.delete) {
+                        await msg.delete();
+                    }
+                } catch (e) {
+                    // Ignoriere Fehler beim Löschen
+                }
+            }
+        }, 60000);
     });
 }
 
