@@ -503,13 +503,25 @@ async function getVideoInfo(urlOrId) {
     }
 
     const args = ["-J", "--no-warnings", urlOrId];
-    const { stdout } = await spawnYtdlp(args);
-    const info = JSON.parse(stdout);
-    return {
-        title: sanitizeString(info.title || "Unbekannt"),
-        duration: info.duration ? formatDuration(info.duration) : "unbekannt",
-        url: info.webpage_url || info.url
-    };
+    console.log(`[VIDEO INFO] Getting info for: ${urlOrId}`);
+    const start = Date.now();
+    
+    try {
+        const { stdout } = await spawnYtdlpSearch(args); // Verwende kurzes Timeout für Info-Abfrage
+        const elapsed = Date.now() - start;
+        console.log(`[VIDEO INFO] Success in ${elapsed}ms`);
+        
+        const info = JSON.parse(stdout);
+        return {
+            title: sanitizeString(info.title || "Unbekannt"),
+            duration: info.duration ? formatDuration(info.duration) : "unbekannt",
+            url: info.webpage_url || info.url
+        };
+    } catch (err) {
+        const elapsed = Date.now() - start;
+        console.error(`[VIDEO INFO] Failed after ${elapsed}ms:`, err.message);
+        throw err;
+    }
 }
 
 // Suche nach YouTube Videos (bis zu 10 Ergebnisse)
