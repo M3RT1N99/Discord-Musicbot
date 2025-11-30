@@ -250,11 +250,17 @@ class AudioCache {
     }
 
     save() {
-        try {
-            fs.writeFileSync(this.indexFile, JSON.stringify([...this.cache]), "utf-8");
-        } catch (e) {
-            console.error("[CACHE] save failed:", e.message);
-        }
+        if (this.saveTimer) clearTimeout(this.saveTimer);
+        this.saveTimer = setTimeout(async () => {
+            try {
+                // Atomic write logic: write to temp file then rename
+                const tempFile = `${this.indexFile}.tmp`;
+                await fs.promises.writeFile(tempFile, JSON.stringify([...this.cache]), "utf-8");
+                await fs.promises.rename(tempFile, this.indexFile);
+            } catch (e) {
+                console.error("[CACHE] async save failed:", e.message);
+            }
+        }, 1000); // Debounce 1 second
     }
 
     makeKeyFromUrl(url) {
@@ -291,7 +297,10 @@ class AudioCache {
             const toRemove = Math.ceil(this.maxEntries * 0.2);
             for (let i = 0; i < toRemove; i++) {
                 const [k,v] = sorted[i];
-                try { if (fs.existsSync(v.filepath)) fs.unlinkSync(v.filepath); } catch {}
+                // Async unlink, ignore errors
+                if (v.filepath) {
+                    fs.promises.unlink(v.filepath).catch(() => {});
+                }
                 this.cache.delete(k);
             }
         }
@@ -304,6 +313,16 @@ const audioCache = new AudioCache(MAX_CACHE);
 const downloadLimiter = new Map(); // userId -> { count, resetTime }
 const MAX_DOWNLOADS_PER_USER = 10;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 Minute
+
+// Cleanup interval for rate limiter (every 5 minutes)
+setInterval(() => {
+    const now = Date.now();
+    for (const [userId, limit] of downloadLimiter.entries()) {
+        if (now > limit.resetTime) {
+            downloadLimiter.delete(userId);
+        }
+    }
+}, 5 * 60 * 1000).unref(); // unref so it doesn't block process exit
 
 // --------------------------- Search Cache ---------------------------
 const searchCache = new Map(); // userId -> { results: [], timestamp }
@@ -1556,8 +1575,8 @@ async function ensureNextTrackDownloadedAndPlay(guildId) {
         // notify and remove track
         if (q.lastInteractionChannel) q.lastInteractionChannel.send(`⚠️ Fehler beim Laden von ${next.title || next.url}: ${e.message}`).catch(()=>{});
         q.songs.shift();
-        // try next
-        return ensureNextTrackDownloadedAndPlay(guildId);
+        // try next with delay to prevent spam
+        setTimeout(() => ensureNextTrackDownloadedAndPlay(guildId), 500);
     }
 }
 
