@@ -13,9 +13,7 @@ child_process.spawn = (cmd, args) => {
     proc.kill = () => {};
 
     // Simulate output for search or info
-    const isSearch = args.some(a => a.toString().startsWith('ytsearch'));
-
-    if (isSearch) {
+    if (args.includes('ytsearch10:')) {
         setTimeout(() => {
             const result = {
                 entries: [
