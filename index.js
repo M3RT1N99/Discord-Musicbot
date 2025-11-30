@@ -338,7 +338,6 @@ function createPlayerForGuild(gid, connection) {
             queue.nowPlayingMessage = null;
         }
 
-        console.log("[DEBUG] CALLING downloadSingleTo", filepath, next.url, "progressCb type:", typeof progressCb);
         // ensure next track is downloaded and played (this handles lazy downloads)
         ensureNextTrackDownloadedAndPlay(gid).catch(e => console.error("[ENSURE NEXT ERROR]", e?.message || e));
     });
@@ -506,7 +505,7 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
             urlOrId
         ];
 
-        const proc = spawn(YTDLP_BIN, args, { shell: true });
+        const proc = spawn(YTDLP_BIN, args, { shell: false });
 
         let stderr = "";
 
@@ -1522,7 +1521,7 @@ async function ensureNextTrackDownloadedAndPlay(guildId) {
     try {
         // download (synchronous in promise but does not block event loop)
         console.log("CALLING downloadSingleTo", filepath, next.url)
-        await downloadSingleTo(filepath, next.url, progressCb);
+        await downloadSingleTo(filepath, next.url, null);
         audioCache.set(next.url, filepath, { title: next.title, duration: next.duration });
         next.filepath = filepath;
         // play
@@ -1580,8 +1579,20 @@ process.on("unhandledRejection", r => console.error("[UNHANDLED REJECTION]", r))
 
 // --------------------------- Start ---------------------------
 ensureDir(DOWNLOAD_DIR);
-if (!TOKEN) {
-    console.error("TOKEN environment variable not set. Exiting.");
-    process.exit(1);
+
+if (require.main === module) {
+    if (!TOKEN) {
+        console.error("TOKEN environment variable not set. Exiting.");
+        process.exit(1);
+    }
+    client.login(TOKEN).catch(err => console.error("Login failed:", err?.message || err));
 }
-client.login(TOKEN).catch(err => console.error("Login failed:", err?.message || err));
+
+// Export for testing
+module.exports = {
+    ensureNextTrackDownloadedAndPlay,
+    guildQueues,
+    audioCache,
+    downloadSingleTo,
+    client // for stubbing
+};
