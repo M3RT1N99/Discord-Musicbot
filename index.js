@@ -677,6 +677,7 @@ const commandBuilders = [
     new SlashCommandBuilder().setName("shuffle").setDescription("Schaltet Shuffle ein/aus"),
     new SlashCommandBuilder().setName("test").setDescription("Spielt test.mp3 im Container"),
     new SlashCommandBuilder().setName("debug").setDescription("Debug-Informationen anzeigen"),
+    new SlashCommandBuilder().setName("playcache").setDescription("Spielt alle Lieder aus dem Cache ab"),
     new SlashCommandBuilder().setName("refresh").setDescription("Commands neu registrieren (Admin only)"),
     new SlashCommandBuilder().setName("clearcache").setDescription("Cache leeren (Admin only)")
 ];
@@ -1122,6 +1123,58 @@ client.on("interactionCreate", async interaction => {
                     .setTimestamp();
                 
                 return interaction.reply({ embeds: [embed] });
+            }
+
+            case "playcache": {
+                if (!memberVoice) return interaction.reply({ content: "Du musst in einem Sprachkanal sein!", ephemeral: true });
+
+                const cacheEntries = [...audioCache.cache.entries()];
+                if (cacheEntries.length === 0) return interaction.reply("Cache ist leer.");
+
+                await interaction.deferReply();
+
+                // Ensure queue
+                if (!queue) {
+                    try {
+                        const conn = joinVoiceChannel({
+                            channelId: memberVoice.id,
+                            guildId,
+                            adapterCreator: memberVoice.guild.voiceAdapterCreator
+                        });
+                        const player = createPlayerForGuild(guildId, conn);
+                        conn.subscribe(player);
+                        queue = { connection: conn, player, songs: [], volume: 50, shuffle: false, lastInteractionChannel: interaction.channel };
+                        guildQueues.set(guildId, queue);
+                    } catch (e) {
+                        return interaction.editReply(`❌ Fehler beim Beitreten: ${e.message}`);
+                    }
+                } else {
+                    queue.lastInteractionChannel = interaction.channel;
+                }
+
+                let addedCount = 0;
+                for (const [key, val] of cacheEntries) {
+                    if (fs.existsSync(val.filepath)) {
+                        queue.songs.push({
+                            requesterId: interaction.user.id,
+                            title: val.meta.title || val.filename,
+                            filepath: val.filepath,
+                            url: key.startsWith("http") ? key : null,
+                            duration: val.meta.duration,
+                            isCached: true
+                        });
+                        addedCount++;
+                    }
+                }
+
+                if (addedCount === 0) return interaction.editReply("❌ Keine gültigen Dateien im Cache gefunden.");
+
+                await interaction.editReply(`✅ **${addedCount}** Songs aus dem Cache zur Queue hinzugefügt.`);
+
+                if (queue.player.state.status !== AudioPlayerStatus.Playing) {
+                    await ensureNextTrackDownloadedAndPlay(guildId);
+                }
+                return;
             }
 
             case "refresh": {
