@@ -468,6 +468,7 @@ async function getPlaylistEntries(playlistUrl) {
     const args = [
         "-J",
         "--no-warnings",
+        "--flat-playlist",
         "--socket-timeout", "60",
         "--ignore-errors",
         "--extractor-args", "youtube:player_client=default",
@@ -480,14 +481,26 @@ async function getPlaylistEntries(playlistUrl) {
 
     // filter: nur gültige URLs und sichere Daten
     const entries = entriesRaw
-        .filter(e => e.webpage_url && isValidMediaUrl(e.webpage_url))
-        .slice(0, 100) // Begrenze Playlist-Größe
-        .map(e => ({
-            url: e.webpage_url,
-            title: sanitizeString(e.title || e.id || "Unbekannt"),
-            duration: e.duration || null,
-            thumbnail: (e.thumbnails && e.thumbnails.length) ? e.thumbnails[e.thumbnails.length-1].url : null
-        }));
+        .map(e => {
+            let url = e.url || e.webpage_url;
+            // Wenn URL ungültig ist (z.B. nur ID), versuche aus ID zu konstruieren
+            if (!url || !isValidMediaUrl(url)) {
+                if (e.id) {
+                    url = `https://www.youtube.com/watch?v=${e.id}`;
+                } else if (url && !url.includes('/') && url.length > 5) {
+                    // Fallback: Wenn url keine URL ist, aber wie eine ID aussieht
+                    url = `https://www.youtube.com/watch?v=${url}`;
+                }
+            }
+            return {
+                url: url,
+                title: sanitizeString(e.title || e.id || "Unbekannt"),
+                duration: e.duration || null,
+                thumbnail: (e.thumbnails && e.thumbnails.length) ? e.thumbnails[e.thumbnails.length-1].url : null
+            };
+        })
+        .filter(e => e.url && isValidMediaUrl(e.url))
+        .slice(0, 100); // Begrenze Playlist-Größe
 
     return { playlistTitle, entries };
 }
