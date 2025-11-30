@@ -485,7 +485,12 @@ async function getPlaylistEntries(playlistUrl) {
             let url = e.url || e.webpage_url;
             // Wenn URL ungültig ist (z.B. nur ID), versuche aus ID zu konstruieren
             if (!url || !isValidMediaUrl(url)) {
-                if (e.id) url = `https://www.youtube.com/watch?v=${e.id}`;
+                if (e.id) {
+                    url = `https://www.youtube.com/watch?v=${e.id}`;
+                } else if (url && !url.includes('/') && url.length > 5) {
+                    // Fallback: Wenn url keine URL ist, aber wie eine ID aussieht
+                    url = `https://www.youtube.com/watch?v=${url}`;
+                }
             }
             return {
                 url: url,

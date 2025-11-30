@@ -20,9 +20,10 @@ child_process.spawn = (cmd, args) => {
                     { id: 'vid1', title: 'Video 1', url: 'vid1', duration: 100 },
                     // Case 2: Full URL provided
                     { id: 'vid2', title: 'Video 2', url: 'https://www.youtube.com/watch?v=vid2', duration: 200 },
-                    // Case 3: Only ID provided (url missing) - yt-dlp might do this?
-                    // Usually url is present. But let's test robust ID handling.
-                    { id: 'vid3', title: 'Video 3', duration: 300 }
+                    // Case 3: Only ID provided (url missing)
+                    { id: 'vid3', title: 'Video 3', duration: 300 },
+                    // Case 4: No ID, but url is the ID (yt-dlp weirdness?)
+                    { title: 'Video 4', url: 'vid4withoutid', duration: 400 }
                 ]
             };
             proc.stdout.emit('data', JSON.stringify(result));
@@ -39,7 +40,7 @@ child_process.spawn = (cmd, args) => {
 const muse = require('../index.js');
 
 async function runTest() {
-    console.log("Running test: getPlaylistEntries with --flat-playlist and ID handling");
+    console.log("Running test: getPlaylistEntries robustness");
 
     const url = "https://www.youtube.com/playlist?list=PLtest";
 
@@ -47,18 +48,28 @@ async function runTest() {
         const result = await muse.getPlaylistEntries(url);
         console.log("Result entries count:", result.entries.length);
 
-        // We expect all 3 videos to be present if handled correctly.
-        // Currently (before fix), Video 1 (url='vid1') and Video 3 (no url) will be filtered out.
-        // Only Video 2 has valid URL.
+        // We want to capture as many as possible.
+        // Currently:
+        // 1 -> Recovered via ID.
+        // 2 -> Valid.
+        // 3 -> Recovered via ID.
+        // 4 -> Fails? (No ID, URL is 'vid4withoutid').
 
-        if (result.entries.length === 1) {
-            console.log("FAIL: Only 1 entry found. ID handling is broken.");
-            process.exit(1);
+        // If we fix case 4, we expect 4 entries.
+        if (result.entries.length < 4) {
+             console.log("FAIL: Not all entries recovered.");
+             // process.exit(1); // Don't fail yet, I need to implement fix.
         }
 
-        assert.strictEqual(result.entries.length, 3, "Should have 3 entries");
-        assert.strictEqual(result.entries[0].url, "https://www.youtube.com/watch?v=vid1");
-        assert.strictEqual(result.entries[2].url, "https://www.youtube.com/watch?v=vid3");
+        // Check contents
+        const urls = result.entries.map(e => e.url);
+        console.log("URLs:", urls);
+
+        assert.ok(urls.includes("https://www.youtube.com/watch?v=vid1"));
+        assert.ok(urls.includes("https://www.youtube.com/watch?v=vid2"));
+        assert.ok(urls.includes("https://www.youtube.com/watch?v=vid3"));
+        // We want this too:
+        assert.ok(urls.includes("https://www.youtube.com/watch?v=vid4withoutid"));
 
         console.log("Test Passed!");
 
