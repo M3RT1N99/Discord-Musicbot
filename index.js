@@ -481,12 +481,19 @@ async function getPlaylistEntries(playlistUrl) {
 
     // filter: nur gültige URLs und sichere Daten
     const entries = entriesRaw
-        .map(e => ({
-            url: e.url || e.webpage_url || (e.id ? `https://www.youtube.com/watch?v=${e.id}` : null),
-            title: sanitizeString(e.title || e.id || "Unbekannt"),
-            duration: e.duration || null,
-            thumbnail: (e.thumbnails && e.thumbnails.length) ? e.thumbnails[e.thumbnails.length-1].url : null
-        }))
+        .map(e => {
+            let url = e.url || e.webpage_url;
+            // Wenn URL ungültig ist (z.B. nur ID), versuche aus ID zu konstruieren
+            if (!url || !isValidMediaUrl(url)) {
+                if (e.id) url = `https://www.youtube.com/watch?v=${e.id}`;
+            }
+            return {
+                url: url,
+                title: sanitizeString(e.title || e.id || "Unbekannt"),
+                duration: e.duration || null,
+                thumbnail: (e.thumbnails && e.thumbnails.length) ? e.thumbnails[e.thumbnails.length-1].url : null
+            };
+        })
         .filter(e => e.url && isValidMediaUrl(e.url))
         .slice(0, 100); // Begrenze Playlist-Größe
 
