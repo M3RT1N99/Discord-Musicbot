@@ -1715,6 +1715,5 @@ module.exports = {
     guildQueues,
     audioCache,
     downloadSingleTo,
-    getPlaylistEntries,
     client // for stubbing
 };
