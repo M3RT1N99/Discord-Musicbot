@@ -338,7 +338,6 @@ function createPlayerForGuild(gid, connection) {
             queue.nowPlayingMessage = null;
         }
 
-        console.log("[DEBUG] CALLING downloadSingleTo", filepath, next.url, "progressCb type:", typeof progressCb);
         // ensure next track is downloaded and played (this handles lazy downloads)
         ensureNextTrackDownloadedAndPlay(gid).catch(e => console.error("[ENSURE NEXT ERROR]", e?.message || e));
     });
@@ -1522,7 +1521,7 @@ async function ensureNextTrackDownloadedAndPlay(guildId) {
     try {
         // download (synchronous in promise but does not block event loop)
         console.log("CALLING downloadSingleTo", filepath, next.url)
-        await downloadSingleTo(filepath, next.url, progressCb);
+        await downloadSingleTo(filepath, next.url, null);
         audioCache.set(next.url, filepath, { title: next.title, duration: next.duration });
         next.filepath = filepath;
         // play
