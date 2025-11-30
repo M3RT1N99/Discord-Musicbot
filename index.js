@@ -469,6 +469,7 @@ async function getPlaylistEntries(playlistUrl) {
         "-J",
         "--no-warnings",
         "--flat-playlist",
+        "--playlist-end", "100", // Limit to prevent massive JSON & IO errors
         "--socket-timeout", "60",
         "--ignore-errors",
         "--extractor-args", "youtube:player_client=default",
@@ -1715,5 +1716,6 @@ module.exports = {
     guildQueues,
     audioCache,
     downloadSingleTo,
+    getPlaylistEntries,
     client // for stubbing
 };
