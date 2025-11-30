@@ -23,7 +23,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-venv \
     ffmpeg \
-    nodejs \
     libopus0 \
     libsodium23 \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
