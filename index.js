@@ -199,12 +199,8 @@ function cleanPlaylistUrl(url) {
             // Wenn der Rest valide aussieht, nutzen wir ihn
             if (/^[a-zA-Z0-9_-]+$/.test(cleanId)) {
                 // Manche IDs haben suffix characters die versehentlich angehängt wurden
-                // Versuche zu reinigen. Typischer Fall: "&si=..." verliert das "&" -> "IDsi=..."
-                if (cleanId.length > 30 && cleanId.endsWith('si')) {
-                     u.searchParams.set("list", cleanId.slice(0, -2));
-                }
-                // Fallback für den Fall, dass nur "i" übrig geblieben ist (wobei "si" wahrscheinlicher ist)
-                else if (cleanId.length > 34 && cleanId.endsWith('i')) {
+                // Versuche zu reinigen
+                if (cleanId.length > 34 && cleanId.endsWith('i')) { // Typisches Pattern bei dem Fehler
                      u.searchParams.set("list", cleanId.slice(0, -1));
                 } else {
                      u.searchParams.set("list", cleanId);
