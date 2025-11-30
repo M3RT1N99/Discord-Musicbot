@@ -27,6 +27,11 @@ const BLOCKED_URL_PATTERNS = [
     /192\.168\./,
     /10\./,
     /172\.(1[6-9]|2[0-9]|3[01])\./,
+    /169\.254\./,
+    /0\.0\.0\.0/,
+    /fc00:/,
+    /fe80:/,
+    /::1/,
     /file:\/\//i,
     /ftp:\/\//i
 ];
@@ -245,11 +250,17 @@ class AudioCache {
     }
 
     save() {
-        try {
-            fs.writeFileSync(this.indexFile, JSON.stringify([...this.cache]), "utf-8");
-        } catch (e) {
-            console.error("[CACHE] save failed:", e.message);
-        }
+        if (this.saveTimer) clearTimeout(this.saveTimer);
+        this.saveTimer = setTimeout(async () => {
+            try {
+                // Atomic write logic: write to temp file then rename
+                const tempFile = `${this.indexFile}.tmp`;
+                await fs.promises.writeFile(tempFile, JSON.stringify([...this.cache]), "utf-8");
+                await fs.promises.rename(tempFile, this.indexFile);
+            } catch (e) {
+                console.error("[CACHE] async save failed:", e.message);
+            }
+        }, 1000); // Debounce 1 second
     }
 
     makeKeyFromUrl(url) {
@@ -286,7 +297,10 @@ class AudioCache {
             const toRemove = Math.ceil(this.maxEntries * 0.2);
             for (let i = 0; i < toRemove; i++) {
                 const [k,v] = sorted[i];
-                try { if (fs.existsSync(v.filepath)) fs.unlinkSync(v.filepath); } catch {}
+                // Async unlink, ignore errors
+                if (v.filepath) {
+                    fs.promises.unlink(v.filepath).catch(() => {});
+                }
                 this.cache.delete(k);
             }
         }
@@ -299,6 +313,16 @@ const audioCache = new AudioCache(MAX_CACHE);
 const downloadLimiter = new Map(); // userId -> { count, resetTime }
 const MAX_DOWNLOADS_PER_USER = 10;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 Minute
+
+// Cleanup interval for rate limiter (every 5 minutes)
+setInterval(() => {
+    const now = Date.now();
+    for (const [userId, limit] of downloadLimiter.entries()) {
+        if (now > limit.resetTime) {
+            downloadLimiter.delete(userId);
+        }
+    }
+}, 5 * 60 * 1000).unref(); // unref so it doesn't block process exit
 
 // --------------------------- Search Cache ---------------------------
 const searchCache = new Map(); // userId -> { results: [], timestamp }
@@ -338,7 +362,6 @@ function createPlayerForGuild(gid, connection) {
             queue.nowPlayingMessage = null;
         }
 
-        console.log("[DEBUG] CALLING downloadSingleTo", filepath, next.url, "progressCb type:", typeof progressCb);
         // ensure next track is downloaded and played (this handles lazy downloads)
         ensureNextTrackDownloadedAndPlay(gid).catch(e => console.error("[ENSURE NEXT ERROR]", e?.message || e));
     });
@@ -445,6 +468,7 @@ async function getPlaylistEntries(playlistUrl) {
     const args = [
         "-J",
         "--no-warnings",
+        "--flat-playlist",
         "--socket-timeout", "60",
         "--ignore-errors",
         "--extractor-args", "youtube:player_client=default",
@@ -457,14 +481,14 @@ async function getPlaylistEntries(playlistUrl) {
 
     // filter: nur gültige URLs und sichere Daten
     const entries = entriesRaw
-        .filter(e => e.webpage_url && isValidMediaUrl(e.webpage_url))
-        .slice(0, 100) // Begrenze Playlist-Größe
         .map(e => ({
-            url: e.webpage_url,
+            url: e.url || e.webpage_url || (e.id ? `https://www.youtube.com/watch?v=${e.id}` : null),
             title: sanitizeString(e.title || e.id || "Unbekannt"),
             duration: e.duration || null,
             thumbnail: (e.thumbnails && e.thumbnails.length) ? e.thumbnails[e.thumbnails.length-1].url : null
-        }));
+        }))
+        .filter(e => e.url && isValidMediaUrl(e.url))
+        .slice(0, 100); // Begrenze Playlist-Größe
 
     return { playlistTitle, entries };
 }
@@ -506,7 +530,7 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
             urlOrId
         ];
 
-        const proc = spawn(YTDLP_BIN, args, { shell: true });
+        const proc = spawn(YTDLP_BIN, args, { shell: false });
 
         let stderr = "";
 
@@ -654,6 +678,7 @@ const commandBuilders = [
     new SlashCommandBuilder().setName("shuffle").setDescription("Schaltet Shuffle ein/aus"),
     new SlashCommandBuilder().setName("test").setDescription("Spielt test.mp3 im Container"),
     new SlashCommandBuilder().setName("debug").setDescription("Debug-Informationen anzeigen"),
+    new SlashCommandBuilder().setName("playcache").setDescription("Spielt alle Lieder aus dem Cache ab"),
     new SlashCommandBuilder().setName("refresh").setDescription("Commands neu registrieren (Admin only)"),
     new SlashCommandBuilder().setName("clearcache").setDescription("Cache leeren (Admin only)")
 ];
@@ -867,8 +892,8 @@ client.on("interactionCreate", async interaction => {
                     console.log(`[SEARCH START] Query: "${sanitizedQuery}"`);
                     
                     let searchResults;
+                    const searchStart = Date.now();
                     try {
-                        const searchStart = Date.now();
                         searchResults = await searchYouTubeVideos(sanitizedQuery, 10);
                         const searchTime = Date.now() - searchStart;
                         console.log(`[SEARCH SUCCESS] Found ${searchResults.length} results in ${searchTime}ms`);
@@ -896,12 +921,21 @@ client.on("interactionCreate", async interaction => {
                     const searchMessage = await safeFollowUp(interaction, truncateMessage(resultText, 1900));
 
                     // Cache die Suchergebnisse und Nachricht-Referenz für den Benutzer
+                    // Cache setzen mit Timeout
                     searchCache.set(interaction.user.id, {
                         results: searchResults,
-                        timestamp: Date.now(),
+                        timestamp: searchStart,
                         messageId: searchMessage?.id,
                         channelId: interaction.channel?.id
                     });
+
+                    // Cleanup Timeout für diesen Cache-Eintrag
+                    setTimeout(() => {
+                        const cached = searchCache.get(interaction.user.id);
+                        if (cached && cached.timestamp === searchStart) { // Nur löschen wenn es noch derselbe Eintrag ist
+                             searchCache.delete(interaction.user.id);
+                        }
+                    }, SEARCH_CACHE_TIMEOUT + 1000); // +1s buffer
 
                     return searchMessage;
                 }
@@ -1090,6 +1124,58 @@ client.on("interactionCreate", async interaction => {
                     .setTimestamp();
                 
                 return interaction.reply({ embeds: [embed] });
+            }
+
+            case "playcache": {
+                if (!memberVoice) return interaction.reply({ content: "Du musst in einem Sprachkanal sein!", ephemeral: true });
+
+                const cacheEntries = [...audioCache.cache.entries()];
+                if (cacheEntries.length === 0) return interaction.reply("Cache ist leer.");
+
+                await interaction.deferReply();
+
+                // Ensure queue
+                if (!queue) {
+                    try {
+                        const conn = joinVoiceChannel({
+                            channelId: memberVoice.id,
+                            guildId,
+                            adapterCreator: memberVoice.guild.voiceAdapterCreator
+                        });
+                        const player = createPlayerForGuild(guildId, conn);
+                        conn.subscribe(player);
+                        queue = { connection: conn, player, songs: [], volume: 50, shuffle: false, lastInteractionChannel: interaction.channel };
+                        guildQueues.set(guildId, queue);
+                    } catch (e) {
+                        return interaction.editReply(`❌ Fehler beim Beitreten: ${e.message}`);
+                    }
+                } else {
+                    queue.lastInteractionChannel = interaction.channel;
+                }
+
+                let addedCount = 0;
+                for (const [key, val] of cacheEntries) {
+                    if (fs.existsSync(val.filepath)) {
+                        queue.songs.push({
+                            requesterId: interaction.user.id,
+                            title: val.meta.title || val.filename,
+                            filepath: val.filepath,
+                            url: key.startsWith("http") ? key : null,
+                            duration: val.meta.duration,
+                            isCached: true
+                        });
+                        addedCount++;
+                    }
+                }
+
+                if (addedCount === 0) return interaction.editReply("❌ Keine gültigen Dateien im Cache gefunden.");
+
+                await interaction.editReply(`✅ **${addedCount}** Songs aus dem Cache zur Queue hinzugefügt.`);
+
+                if (queue.player.state.status !== AudioPlayerStatus.Playing) {
+                    await ensureNextTrackDownloadedAndPlay(guildId);
+                }
+                return;
             }
 
             case "refresh": {
@@ -1337,6 +1423,7 @@ if (audioCache.has(url)) {
     // Progress callback (akzeptiert sowohl String als auch Objekt)
     const progressCb = (data) => {
         console.log("[PROGRESS_CB ENTER]", data);
+        const now = Date.now();
 
         try {
             if (typeof data === "string") data = { raw: data };
@@ -1395,9 +1482,13 @@ if (audioCache.has(url)) {
 
             if (percent !== null && !isNaN(percent) && percent >= 0 && percent <= 100) {
                 console.log(`[PROGRESS UPDATE] Valid percent: ${percent}%, lastPercent: ${progressCb.lastPercent}`);
-                // Update mit 3% Abstand für mehr Updates, aber immer bei 100%
-                if (!progressCb.lastPercent || percent - progressCb.lastPercent >= 3 || percent === 100) {
+                // Update mit 3% Abstand UND Zeitabstand (oder 100%)
+                const timeDiff = now - (progressCb.lastUpdate || 0);
+                const percentDiff = percent - (progressCb.lastPercent || 0);
+
+                if (percent === 100 || (percentDiff >= 3 && timeDiff > PROGRESS_EDIT_INTERVAL_MS) || !progressCb.lastPercent) {
                     progressCb.lastPercent = percent;
+                    progressCb.lastUpdate = now;
                     try {
                         const description = `${percent.toFixed(0)}% abgeschlossen${data.speed ? ` (${data.speed})` : ''}${data.eta ? ` ETA: ${data.eta}` : ''}`;
                         console.log(`[PROGRESS UPDATE] 🔄 Updating Discord message: "${description}"`);
@@ -1491,6 +1582,9 @@ async function ensureNextTrackDownloadedAndPlay(guildId) {
     // If current player already playing, do nothing
     if (q.player.state.status === AudioPlayerStatus.Playing) return;
 
+    // Race condition check: already downloading?
+    if (q.isDownloading) return;
+
     // get next track (peek)
     const next = q.songs[0];
     if (!next) return;
@@ -1520,20 +1614,23 @@ async function ensureNextTrackDownloadedAndPlay(guildId) {
     }
 
     try {
+        q.isDownloading = true;
         // download (synchronous in promise but does not block event loop)
         console.log("CALLING downloadSingleTo", filepath, next.url)
-        await downloadSingleTo(filepath, next.url, progressCb);
+        await downloadSingleTo(filepath, next.url, null);
         audioCache.set(next.url, filepath, { title: next.title, duration: next.duration });
         next.filepath = filepath;
         // play
+        q.isDownloading = false;
         playNextInGuild(guildId);
     } catch (e) {
+        q.isDownloading = false;
         console.error("[NEXT DOWNLOAD ERROR]", e?.message || e);
         // notify and remove track
         if (q.lastInteractionChannel) q.lastInteractionChannel.send(`⚠️ Fehler beim Laden von ${next.title || next.url}: ${e.message}`).catch(()=>{});
         q.songs.shift();
-        // try next
-        return ensureNextTrackDownloadedAndPlay(guildId);
+        // try next with delay to prevent spam
+        setTimeout(() => ensureNextTrackDownloadedAndPlay(guildId), 500);
     }
 }
 
@@ -1574,14 +1671,38 @@ function playNextInGuild(guildId) {
 }
 
 
+// --------------------------- Guild Events ---------------------------
+client.on("guildDelete", guild => {
+    console.log(`[GUILD LEAVE] Left guild: ${guild.name} (${guild.id})`);
+    const queue = guildQueues.get(guild.id);
+    if (queue) {
+        queue.player.stop();
+        try { queue.connection.destroy(); } catch {}
+        guildQueues.delete(guild.id);
+    }
+});
+
 // --------------------------- Process errors ---------------------------
 process.on("uncaughtException", err => console.error("[FATAL]", err && err.stack ? err.stack : err));
 process.on("unhandledRejection", r => console.error("[UNHANDLED REJECTION]", r));
 
 // --------------------------- Start ---------------------------
 ensureDir(DOWNLOAD_DIR);
-if (!TOKEN) {
-    console.error("TOKEN environment variable not set. Exiting.");
-    process.exit(1);
+
+if (require.main === module) {
+    if (!TOKEN) {
+        console.error("TOKEN environment variable not set. Exiting.");
+        process.exit(1);
+    }
+    client.login(TOKEN).catch(err => console.error("Login failed:", err?.message || err));
 }
-client.login(TOKEN).catch(err => console.error("Login failed:", err?.message || err));
+
+// Export for testing
+module.exports = {
+    ensureNextTrackDownloadedAndPlay,
+    guildQueues,
+    audioCache,
+    downloadSingleTo,
+    getPlaylistEntries,
+    client // for stubbing
+};
