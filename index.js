@@ -27,6 +27,11 @@ const BLOCKED_URL_PATTERNS = [
     /192\.168\./,
     /10\./,
     /172\.(1[6-9]|2[0-9]|3[01])\./,
+    /169\.254\./,
+    /0\.0\.0\.0/,
+    /fc00:/,
+    /fe80:/,
+    /::1/,
     /file:\/\//i,
     /ftp:\/\//i
 ];
@@ -505,7 +510,7 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
             urlOrId
         ];
 
-        const proc = spawn(YTDLP_BIN, args, { shell: true });
+        const proc = spawn(YTDLP_BIN, args, { shell: false });
 
         let stderr = "";
 
@@ -866,8 +871,8 @@ client.on("interactionCreate", async interaction => {
                     console.log(`[SEARCH START] Query: "${sanitizedQuery}"`);
                     
                     let searchResults;
+                    const searchStart = Date.now();
                     try {
-                        const searchStart = Date.now();
                         searchResults = await searchYouTubeVideos(sanitizedQuery, 10);
                         const searchTime = Date.now() - searchStart;
                         console.log(`[SEARCH SUCCESS] Found ${searchResults.length} results in ${searchTime}ms`);
@@ -895,12 +900,21 @@ client.on("interactionCreate", async interaction => {
                     const searchMessage = await safeFollowUp(interaction, truncateMessage(resultText, 1900));
 
                     // Cache die Suchergebnisse und Nachricht-Referenz für den Benutzer
+                    // Cache setzen mit Timeout
                     searchCache.set(interaction.user.id, {
                         results: searchResults,
-                        timestamp: Date.now(),
+                        timestamp: searchStart,
                         messageId: searchMessage?.id,
                         channelId: interaction.channel?.id
                     });
+
+                    // Cleanup Timeout für diesen Cache-Eintrag
+                    setTimeout(() => {
+                        const cached = searchCache.get(interaction.user.id);
+                        if (cached && cached.timestamp === searchStart) { // Nur löschen wenn es noch derselbe Eintrag ist
+                             searchCache.delete(interaction.user.id);
+                        }
+                    }, SEARCH_CACHE_TIMEOUT + 1000); // +1s buffer
 
                     return searchMessage;
                 }
@@ -1336,6 +1350,7 @@ if (audioCache.has(url)) {
     // Progress callback (akzeptiert sowohl String als auch Objekt)
     const progressCb = (data) => {
         console.log("[PROGRESS_CB ENTER]", data);
+        const now = Date.now();
 
         try {
             if (typeof data === "string") data = { raw: data };
@@ -1394,9 +1409,13 @@ if (audioCache.has(url)) {
 
             if (percent !== null && !isNaN(percent) && percent >= 0 && percent <= 100) {
                 console.log(`[PROGRESS UPDATE] Valid percent: ${percent}%, lastPercent: ${progressCb.lastPercent}`);
-                // Update mit 3% Abstand für mehr Updates, aber immer bei 100%
-                if (!progressCb.lastPercent || percent - progressCb.lastPercent >= 3 || percent === 100) {
+                // Update mit 3% Abstand UND Zeitabstand (oder 100%)
+                const timeDiff = now - (progressCb.lastUpdate || 0);
+                const percentDiff = percent - (progressCb.lastPercent || 0);
+
+                if (percent === 100 || (percentDiff >= 3 && timeDiff > PROGRESS_EDIT_INTERVAL_MS) || !progressCb.lastPercent) {
                     progressCb.lastPercent = percent;
+                    progressCb.lastUpdate = now;
                     try {
                         const description = `${percent.toFixed(0)}% abgeschlossen${data.speed ? ` (${data.speed})` : ''}${data.eta ? ` ETA: ${data.eta}` : ''}`;
                         console.log(`[PROGRESS UPDATE] 🔄 Updating Discord message: "${description}"`);
@@ -1490,6 +1509,9 @@ async function ensureNextTrackDownloadedAndPlay(guildId) {
     // If current player already playing, do nothing
     if (q.player.state.status === AudioPlayerStatus.Playing) return;
 
+    // Race condition check: already downloading?
+    if (q.isDownloading) return;
+
     // get next track (peek)
     const next = q.songs[0];
     if (!next) return;
@@ -1519,14 +1541,17 @@ async function ensureNextTrackDownloadedAndPlay(guildId) {
     }
 
     try {
+        q.isDownloading = true;
         // download (synchronous in promise but does not block event loop)
         console.log("CALLING downloadSingleTo", filepath, next.url)
         await downloadSingleTo(filepath, next.url, null);
         audioCache.set(next.url, filepath, { title: next.title, duration: next.duration });
         next.filepath = filepath;
         // play
+        q.isDownloading = false;
         playNextInGuild(guildId);
     } catch (e) {
+        q.isDownloading = false;
         console.error("[NEXT DOWNLOAD ERROR]", e?.message || e);
         // notify and remove track
         if (q.lastInteractionChannel) q.lastInteractionChannel.send(`⚠️ Fehler beim Laden von ${next.title || next.url}: ${e.message}`).catch(()=>{});
@@ -1573,14 +1598,37 @@ function playNextInGuild(guildId) {
 }
 
 
+// --------------------------- Guild Events ---------------------------
+client.on("guildDelete", guild => {
+    console.log(`[GUILD LEAVE] Left guild: ${guild.name} (${guild.id})`);
+    const queue = guildQueues.get(guild.id);
+    if (queue) {
+        queue.player.stop();
+        try { queue.connection.destroy(); } catch {}
+        guildQueues.delete(guild.id);
+    }
+});
+
 // --------------------------- Process errors ---------------------------
 process.on("uncaughtException", err => console.error("[FATAL]", err && err.stack ? err.stack : err));
 process.on("unhandledRejection", r => console.error("[UNHANDLED REJECTION]", r));
 
 // --------------------------- Start ---------------------------
 ensureDir(DOWNLOAD_DIR);
-if (!TOKEN) {
-    console.error("TOKEN environment variable not set. Exiting.");
-    process.exit(1);
+
+if (require.main === module) {
+    if (!TOKEN) {
+        console.error("TOKEN environment variable not set. Exiting.");
+        process.exit(1);
+    }
+    client.login(TOKEN).catch(err => console.error("Login failed:", err?.message || err));
 }
-client.login(TOKEN).catch(err => console.error("Login failed:", err?.message || err));
+
+// Export for testing
+module.exports = {
+    ensureNextTrackDownloadedAndPlay,
+    guildQueues,
+    audioCache,
+    downloadSingleTo,
+    client // for stubbing
+};
