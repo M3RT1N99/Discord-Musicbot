@@ -196,11 +196,24 @@ function cleanPlaylistUrl(url) {
         // Spezieller Check für "=" innerhalb der ID (typischer Fehler durch Copy-Paste concatenation)
         if (listId.includes("=")) {
             const cleanId = listId.split("=")[0];
-            // Wenn der Rest valide aussieht, nutzen wir ihn
+
+            // Strategy 1: Regex for standard 34-char PL playlists (PL + 32 chars)
+            // Dies ist die sicherste Methode, da wir genau wissen wie lang die ID sein muss
+            const plMatch = cleanId.match(/^(PL[a-zA-Z0-9_-]{32})/);
+            if (plMatch) {
+                u.searchParams.set("list", plMatch[1]);
+                return u.toString();
+            }
+
+            // Wenn der Rest valide aussieht, nutzen wir ihn (Fallback für andere ID Typen)
             if (/^[a-zA-Z0-9_-]+$/.test(cleanId)) {
                 // Manche IDs haben suffix characters die versehentlich angehängt wurden
-                // Versuche zu reinigen
-                if (cleanId.length > 34 && cleanId.endsWith('i')) { // Typisches Pattern bei dem Fehler
+                // Versuche zu reinigen. Typischer Fall: "&si=..." verliert das "&" -> "IDsi=..."
+                if (cleanId.length > 30 && cleanId.endsWith('si')) {
+                     u.searchParams.set("list", cleanId.slice(0, -2));
+                }
+                // Fallback für den Fall, dass nur "i" übrig geblieben ist
+                else if (cleanId.length > 34 && cleanId.endsWith('i')) {
                      u.searchParams.set("list", cleanId.slice(0, -1));
                 } else {
                      u.searchParams.set("list", cleanId);
@@ -396,6 +409,17 @@ function createPlayerForGuild(gid, connection) {
             queue.nowPlayingMessage = null;
         }
 
+        // Loop Logic
+        if (queue && queue.currentTrack) {
+            if (queue.loopMode === 'song') {
+                // Wiederhole aktuellen Song (vorne einfügen)
+                queue.songs.unshift(queue.currentTrack);
+            } else if (queue.loopMode === 'queue') {
+                // Wiederhole aktuellen Song (hinten anfügen)
+                queue.songs.push(queue.currentTrack);
+            }
+        }
+
         // ensure next track is downloaded and played (this handles lazy downloads)
         ensureNextTrackDownloadedAndPlay(gid).catch(e => console.error("[ENSURE NEXT ERROR]", e?.message || e));
     });
@@ -512,8 +536,28 @@ async function getPlaylistEntries(playlistUrl) {
         "--extractor-args", "youtube:player_client=default",
         playlistUrl
     ];
-    const { stdout } = await spawnYtdlp(args);
-    const json = JSON.parse(stdout);
+
+    let stdout;
+    try {
+        const res = await spawnYtdlp(args);
+        stdout = res.stdout;
+    } catch (e) {
+        // Wenn yt-dlp Fehler meldet, aber JSON geliefert hat, versuchen wir es trotzdem
+        if (e.stdout && e.stdout.trim().length > 0) {
+            console.warn(`[PLAYLIST WARN] yt-dlp exited with ${e.code}, but returned data. Attempting parse.`);
+            stdout = e.stdout;
+        } else {
+            throw e;
+        }
+    }
+
+    let json;
+    try {
+        json = JSON.parse(stdout);
+    } catch (e) {
+        throw new Error(`Failed to parse playlist JSON: ${e.message}`);
+    }
+
     const playlistTitle = sanitizeString(json.title || json.playlist_title || "Playlist");
     const entriesRaw = json.entries || [];
 
@@ -730,7 +774,9 @@ const commandBuilders = [
     new SlashCommandBuilder().setName("debug").setDescription("Debug-Informationen anzeigen"),
     new SlashCommandBuilder().setName("playcache").setDescription("Spielt alle Lieder aus dem Cache ab"),
     new SlashCommandBuilder().setName("refresh").setDescription("Commands neu registrieren (Admin only)"),
-    new SlashCommandBuilder().setName("clearcache").setDescription("Cache leeren (Admin only)")
+    new SlashCommandBuilder().setName("clearcache").setDescription("Cache leeren (Admin only)"),
+    new SlashCommandBuilder().setName("repeatsingle").setDescription("Wiederholt den aktuellen Song"),
+    new SlashCommandBuilder().setName("repeat").setDescription("Wiederholt die gesamte Queue")
 ];
 
 // --------------------------- Client & Command registration ---------------------------
@@ -852,7 +898,7 @@ client.on("interactionCreate", async interaction => {
                                 // create player and subscribe
                                 const player = createPlayerForGuild(guildId, conn);
                                 conn.subscribe(player);
-                                queue = { connection: conn, player, songs: [], volume: 50, shuffle: false, lastInteractionChannel: interaction.channel };
+                                queue = { connection: conn, player, songs: [], volume: 50, shuffle: false, loopMode: 'off', lastInteractionChannel: interaction.channel };
                                 guildQueues.set(guildId, queue);
                                 return queue;
                             } catch (e) {
@@ -1326,6 +1372,30 @@ client.on("interactionCreate", async interaction => {
                 }
             }
 
+            case "repeatsingle": {
+                if (!queue) return interaction.reply("Keine Musik läuft.");
+
+                if (queue.loopMode === 'song') {
+                    queue.loopMode = 'off';
+                    return interaction.reply("🔁 Loop (Single) deaktiviert.");
+                } else {
+                    queue.loopMode = 'song';
+                    return interaction.reply("🔂 Loop (Single) aktiviert: Aktueller Song wird wiederholt.");
+                }
+            }
+
+            case "repeat": {
+                if (!queue) return interaction.reply("Keine Musik läuft.");
+
+                if (queue.loopMode === 'queue') {
+                    queue.loopMode = 'off';
+                    return interaction.reply("🔁 Loop (Queue) deaktiviert.");
+                } else {
+                    queue.loopMode = 'queue';
+                    return interaction.reply("🔁 Loop (Queue) aktiviert: Gesamte Queue wird wiederholt.");
+                }
+            }
+
             default:
                 return interaction.reply("Unbekannter Befehl.");
         }
@@ -1717,6 +1787,10 @@ function playNextInGuild(guildId) {
     if (!q) return;
     const track = q.songs.shift();
     if (!track) return;
+
+    // Set current track for looping logic
+    q.currentTrack = track;
+
     const resource = createAudioResource(track.filepath, { inlineVolume: true });
     resource.volume.setVolume((q.volume || 50) / 100);
     q.player.play(resource);
