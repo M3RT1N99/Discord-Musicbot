@@ -196,24 +196,11 @@ function cleanPlaylistUrl(url) {
         // Spezieller Check für "=" innerhalb der ID (typischer Fehler durch Copy-Paste concatenation)
         if (listId.includes("=")) {
             const cleanId = listId.split("=")[0];
-
-            // Strategy 1: Regex for standard 34-char PL playlists (PL + 32 chars)
-            // Dies ist die sicherste Methode, da wir genau wissen wie lang die ID sein muss
-            const plMatch = cleanId.match(/^(PL[a-zA-Z0-9_-]{32})/);
-            if (plMatch) {
-                u.searchParams.set("list", plMatch[1]);
-                return u.toString();
-            }
-
-            // Wenn der Rest valide aussieht, nutzen wir ihn (Fallback für andere ID Typen)
+            // Wenn der Rest valide aussieht, nutzen wir ihn
             if (/^[a-zA-Z0-9_-]+$/.test(cleanId)) {
                 // Manche IDs haben suffix characters die versehentlich angehängt wurden
-                // Versuche zu reinigen. Typischer Fall: "&si=..." verliert das "&" -> "IDsi=..."
-                if (cleanId.length > 30 && cleanId.endsWith('si')) {
-                     u.searchParams.set("list", cleanId.slice(0, -2));
-                }
-                // Fallback für den Fall, dass nur "i" übrig geblieben ist
-                else if (cleanId.length > 34 && cleanId.endsWith('i')) {
+                // Versuche zu reinigen
+                if (cleanId.length > 34 && cleanId.endsWith('i')) { // Typisches Pattern bei dem Fehler
                      u.searchParams.set("list", cleanId.slice(0, -1));
                 } else {
                      u.searchParams.set("list", cleanId);
