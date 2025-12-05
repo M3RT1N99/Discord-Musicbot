@@ -225,7 +225,7 @@ function isRealPlaylist(url) {
         // Auto-Mix/Radio Listen erkennen (beginnen meist mit RD)
         if (listParam.startsWith('RD')) {
             console.log(`[PLAYLIST CHECK] Auto-Mix/Radio detected: ${listParam}`);
-            return false;
+            return true;
         }
         
         // Echte Playlists beginnen meist mit PL oder UU
@@ -890,8 +890,31 @@ client.on("interactionCreate", async interaction => {
 
                     if (!entries.length) return await safeFollowUp(interaction, "Keine gültigen Einträge in der Playlist gefunden.");
 
+                    // Prüfe auf index Parameter
+                    let startIndex = 0;
+                    try {
+                        const u = new URL(sanitizedQuery);
+                        if (u.searchParams.has("index")) {
+                            const idx = parseInt(u.searchParams.get("index"), 10);
+                            if (!isNaN(idx) && idx > 0 && idx <= entries.length) {
+                                startIndex = idx - 1;
+                            }
+                        }
+                    } catch {}
+
+                    // Reorder playlist: [startIndex, startIndex+1 ... end, 0 ... startIndex-1]
+                    const orderedEntries = [];
+                    // Start track and subsequent
+                    for (let i = startIndex; i < entries.length; i++) {
+                        orderedEntries.push(entries[i]);
+                    }
+                    // Previous tracks (wrap around)
+                    for (let i = 0; i < startIndex; i++) {
+                        orderedEntries.push(entries[i]);
+                    }
+
                     // erstes Lied sofort abspielen
-                    const [firstEntry, ...restEntries] = entries;
+                    const [firstEntry, ...restEntries] = orderedEntries;
 
                     // restliche Tracks lazy in Queue hinzufügen
                     for (const e of restEntries) {
@@ -926,7 +949,11 @@ client.on("interactionCreate", async interaction => {
                     // starte erstes Lied
                     await safePlay(firstEntry);
 
-                    await safeFollowUp(interaction, `➕ Playlist **${playlistTitle}** (${entries.length} Einträge) zur Queue hinzugefügt.`);
+                    let msg = `➕ Playlist **${playlistTitle}** (${entries.length} Einträge) zur Queue hinzugefügt.`;
+                    if (startIndex > 0) {
+                        msg += `\n▶️ Starte bei Track #${startIndex + 1}, vorherige Tracks wurden ans Ende angehängt.`;
+                    }
+                    await safeFollowUp(interaction, msg);
                     return;
                 }
 
