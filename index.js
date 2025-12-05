@@ -180,6 +180,53 @@ function cleanYouTubeUrl(url) {
     return null;
 }
 
+// Bereinigt Playlist URL von potentiell schädlichen/kaputten Parametern
+function cleanPlaylistUrl(url) {
+    if (!url) return null;
+    try {
+        const u = new URL(url);
+        const listId = u.searchParams.get("list");
+        if (!listId) return url;
+
+        // Erkenne malformierte List-IDs (z.B. "PLxyz...i=abc...")
+        // Wir nehmen alles bis zum ersten nicht-alphanumerischen Zeichen (außer - und _)
+        // Standard YouTube IDs sind [a-zA-Z0-9_-]+
+        // Wenn "list" aber komische Zeichen enthält, schneiden wir ab.
+
+        // Spezieller Check für "=" innerhalb der ID (typischer Fehler durch Copy-Paste concatenation)
+        if (listId.includes("=")) {
+            const cleanId = listId.split("=")[0];
+
+            // Strategy 1: Regex for standard 34-char PL playlists (PL + 32 chars)
+            // Dies ist die sicherste Methode, da wir genau wissen wie lang die ID sein muss
+            const plMatch = cleanId.match(/^(PL[a-zA-Z0-9_-]{32})/);
+            if (plMatch) {
+                u.searchParams.set("list", plMatch[1]);
+                return u.toString();
+            }
+
+            // Wenn der Rest valide aussieht, nutzen wir ihn (Fallback für andere ID Typen)
+            if (/^[a-zA-Z0-9_-]+$/.test(cleanId)) {
+                // Manche IDs haben suffix characters die versehentlich angehängt wurden
+                // Versuche zu reinigen. Typischer Fall: "&si=..." verliert das "&" -> "IDsi=..."
+                if (cleanId.length > 30 && cleanId.endsWith('si')) {
+                     u.searchParams.set("list", cleanId.slice(0, -2));
+                }
+                // Fallback für den Fall, dass nur "i" übrig geblieben ist
+                else if (cleanId.length > 34 && cleanId.endsWith('i')) {
+                     u.searchParams.set("list", cleanId.slice(0, -1));
+                } else {
+                     u.searchParams.set("list", cleanId);
+                }
+            }
+        }
+
+        return u.toString();
+    } catch {
+        return url;
+    }
+}
+
 // Prüft ob es eine echte Playlist ist (nicht Auto-Mix/Radio)
 function isRealPlaylist(url) {
     try {
@@ -191,7 +238,7 @@ function isRealPlaylist(url) {
         // Auto-Mix/Radio Listen erkennen (beginnen meist mit RD)
         if (listParam.startsWith('RD')) {
             console.log(`[PLAYLIST CHECK] Auto-Mix/Radio detected: ${listParam}`);
-            return false;
+            return true;
         }
         
         // Echte Playlists beginnen meist mit PL oder UU
@@ -459,6 +506,9 @@ async function getYtdlpInfo(urlOrQuery) {
 
 // get playlist entries (full info so we can get durations and thumbnails)
 async function getPlaylistEntries(playlistUrl) {
+    // Bereinige URL zuerst
+    playlistUrl = cleanPlaylistUrl(playlistUrl);
+
     // Validiere Playlist URL
     if (!isYouTubePlaylistUrl(playlistUrl)) {
         throw new Error('Invalid playlist URL');
@@ -853,8 +903,31 @@ client.on("interactionCreate", async interaction => {
 
                     if (!entries.length) return await safeFollowUp(interaction, "Keine gültigen Einträge in der Playlist gefunden.");
 
+                    // Prüfe auf index Parameter
+                    let startIndex = 0;
+                    try {
+                        const u = new URL(sanitizedQuery);
+                        if (u.searchParams.has("index")) {
+                            const idx = parseInt(u.searchParams.get("index"), 10);
+                            if (!isNaN(idx) && idx > 0 && idx <= entries.length) {
+                                startIndex = idx - 1;
+                            }
+                        }
+                    } catch {}
+
+                    // Reorder playlist: [startIndex, startIndex+1 ... end, 0 ... startIndex-1]
+                    const orderedEntries = [];
+                    // Start track and subsequent
+                    for (let i = startIndex; i < entries.length; i++) {
+                        orderedEntries.push(entries[i]);
+                    }
+                    // Previous tracks (wrap around)
+                    for (let i = 0; i < startIndex; i++) {
+                        orderedEntries.push(entries[i]);
+                    }
+
                     // erstes Lied sofort abspielen
-                    const [firstEntry, ...restEntries] = entries;
+                    const [firstEntry, ...restEntries] = orderedEntries;
 
                     // restliche Tracks lazy in Queue hinzufügen
                     for (const e of restEntries) {
@@ -889,7 +962,11 @@ client.on("interactionCreate", async interaction => {
                     // starte erstes Lied
                     await safePlay(firstEntry);
 
-                    await safeFollowUp(interaction, `➕ Playlist **${playlistTitle}** (${entries.length} Einträge) zur Queue hinzugefügt.`);
+                    let msg = `➕ Playlist **${playlistTitle}** (${entries.length} Einträge) zur Queue hinzugefügt.`;
+                    if (startIndex > 0) {
+                        msg += `\n▶️ Starte bei Track #${startIndex + 1}, vorherige Tracks wurden ans Ende angehängt.`;
+                    }
+                    await safeFollowUp(interaction, msg);
                     return;
                 }
 
