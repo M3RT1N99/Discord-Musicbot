@@ -42,7 +42,7 @@ const MAX_URL_LENGTH = 2048;
 function sanitizeString(input) {
     if (typeof input !== 'string') return '';
     // Entferne potentiell gefährliche Zeichen
-    return input.replace(/[<>"|&;$`\\]/g, '').trim();
+    return input.replace(/[<>"|;$`\\]/g, '').trim();
 }
 
 // Prüft, ob eine Interaction noch gültig ist
@@ -392,6 +392,116 @@ function checkRateLimit(userId) {
     return true;
 }
 
+// --------------------------- Background Downloader ---------------------------
+class BackgroundDownloader {
+    constructor() {
+        this.active = false;
+        this.queue = []; // Array of { guildId, track }
+    }
+
+    addToQueue(guildId, track) {
+        this.queue.push({ guildId, track });
+        this.processQueue();
+    }
+
+    async processQueue() {
+        if (this.active || this.queue.length === 0) return;
+        this.active = true;
+
+        while (this.queue.length > 0) {
+            const item = this.queue.shift();
+            const { guildId, track } = item;
+
+            // Skip if track already has filepath or guild gone
+            const guildQueue = guildQueues.get(guildId);
+            if (!guildQueue || track.filepath) continue;
+
+            // Check cache first
+            if (audioCache.has(track.url)) {
+                track.filepath = audioCache.get(track.url);
+                const meta = audioCache.cache.get(audioCache.makeKeyFromUrl(track.url))?.meta;
+                if (meta) {
+                     track.title = meta.title || track.title;
+                     track.duration = meta.duration || track.duration;
+                }
+                this.updatePlaylistProgress(guildId, track, 100);
+                continue;
+            }
+
+            try {
+                // Ensure filename
+                const tempFilename = `song_${Date.now()}_${randomUUID().slice(0,8)}.m4a`;
+                const filepath = path.join(DOWNLOAD_DIR, tempFilename);
+
+                // Download with progress
+                const progressManager = new DownloadProgressManager();
+                await downloadSingleTo(filepath, track.url, (data) => {
+                     // Parse progress using our unified manager
+                     const parsed = progressManager.parseProgress(data);
+                     if (parsed && progressManager.shouldUpdate(parsed.percent)) {
+                         this.updatePlaylistProgress(guildId, track, parsed.percent, parsed.speed);
+                     }
+                });
+
+                // Success
+                track.filepath = filepath;
+
+                // Get info for cache if title missing
+                if (!track.duration || track.title === "Unbekannt") {
+                    try {
+                        const info = await getVideoInfo(track.url);
+                        track.title = info.title;
+                        track.duration = info.duration;
+                    } catch {}
+                }
+
+                audioCache.set(track.url, filepath, { title: track.title, duration: track.duration });
+                this.updatePlaylistProgress(guildId, track, 100);
+
+            } catch (err) {
+                console.warn(`[BG DOWNLOAD ERROR] ${track.url}: ${err.message}`);
+                // Optional: remove failed track from guild queue?
+                // For now we keep it, ensureNextTrack... will try again or skip
+            }
+
+            // Small delay to yield event loop
+            await new Promise(r => setTimeout(r, 200));
+        }
+
+        this.active = false;
+    }
+
+    updatePlaylistProgress(guildId, track, percent, speed) {
+        const guildQueue = guildQueues.get(guildId);
+        if (!guildQueue || !guildQueue.playlistProgressMsg) return;
+
+        const now = Date.now();
+        // Throttle updates
+        if (percent < 100 && now - (guildQueue.lastProgressUpdate || 0) < 3000) return;
+        guildQueue.lastProgressUpdate = now;
+
+        const total = guildQueue.songs.filter(s => s.playlistTitle === track.playlistTitle).length;
+        const downloaded = guildQueue.songs.filter(s => s.playlistTitle === track.playlistTitle && s.filepath).length;
+
+        // Don't update if everything is done (we'll send a final message elsewhere or let it expire)
+        // actually nice to show 100%
+
+        const progressManager = new DownloadProgressManager();
+        const bar = progressManager.createProgressBar(percent);
+
+        const embed = new EmbedBuilder()
+            .setTitle(`⬇️ Playlist Download: ${track.playlistTitle}`)
+            .setDescription(`**Lade:** ${truncateMessage(track.title, 60)}\n${bar} ${percent.toFixed(0)}% ${speed ? `(${speed})` : ''}`)
+            .setFooter({ text: `Fortschritt: ${downloaded}/${total} Songs bereit` })
+            .setColor(percent === 100 ? 0x00FF00 : 0x1DB954);
+
+        guildQueue.playlistProgressMsg.edit({ embeds: [embed] }).catch(() => {
+            guildQueue.playlistProgressMsg = null; // Stop updating if message deleted
+        });
+    }
+}
+const backgroundDownloader = new BackgroundDownloader();
+
 // --------------------------- Guild Queue System ---------------------------
 // guildQueues: Map<guildId, { connection, player, songs: [track], volume, shuffle, lastInteractionChannel }>
 const guildQueues = new Map();
@@ -427,7 +537,7 @@ function createPlayerForGuild(gid, connection) {
 }
 
 // --------------------------- yt-dlp helpers ---------------------------
-function spawnYtdlp(args, opts = {}) {
+function spawnYtdlp(args, opts = {}, timeoutMs = DOWNLOAD_TIMEOUT_MS, errorMsg = "yt-dlp timeout") {
     return new Promise((resolve, reject) => {
         // Validiere alle Argumente
         const safeArgs = args.filter(arg => {
@@ -446,43 +556,93 @@ function spawnYtdlp(args, opts = {}) {
         let stdout = "", stderr = "";
         proc.stdout.on("data", d => { stdout += d.toString(); });
         proc.stderr.on("data", d => { stderr += d.toString(); });
-        const timer = setTimeout(() => { proc.kill("SIGKILL"); reject(new Error("yt-dlp timeout")); }, DOWNLOAD_TIMEOUT_MS);
-        proc.on("error", err => { clearTimeout(timer); reject(err); });
-        proc.on("close", code => { clearTimeout(timer); if (code === 0) resolve({ stdout, stderr, code }); else reject(new Error(`yt-dlp exited ${code}: ${stderr.split("\n").slice(-6).join("\n")}`)); });
-    });
-}
 
-// Spezielle Funktion für Suchoperationen mit kürzerem Timeout
-function spawnYtdlpSearch(args, opts = {}) {
-    return new Promise((resolve, reject) => {
-        // Validiere alle Argumente
-        const safeArgs = args.filter(arg => {
-            if (typeof arg !== 'string') return false;
-            // Verhindere gefährliche Flags
-            if (arg.startsWith('--exec') || arg.startsWith('--command')) return false;
-            if (arg.includes('..') || arg.includes('\x00')) return false;
-            return true;
-        });
-
-        const proc = spawn(YTDLP_BIN, safeArgs, { 
-            ...opts, 
-            stdio: ["ignore","pipe","pipe"],
-            shell: false // Verhindere Shell-Injection
-        });
-        let stdout = "", stderr = "";
-        proc.stdout.on("data", d => { stdout += d.toString(); });
-        proc.stderr.on("data", d => { stderr += d.toString(); });
         const timer = setTimeout(() => { 
             proc.kill("SIGKILL"); 
-            reject(new Error("Search timeout - try a more specific query")); 
-        }, SEARCH_TIMEOUT_MS);
+            reject(new Error(errorMsg));
+        }, timeoutMs);
+
         proc.on("error", err => { clearTimeout(timer); reject(err); });
         proc.on("close", code => { 
             clearTimeout(timer); 
             if (code === 0) resolve({ stdout, stderr, code }); 
-            else reject(new Error(`Search failed: ${stderr.split("\n").slice(-3).join("\n")}`)); 
+            else reject(new Error(`yt-dlp exited ${code}: ${stderr.split("\n").slice(-6).join("\n")}`));
         });
     });
+}
+
+// Wrapper für Suchoperationen
+function spawnYtdlpSearch(args, opts = {}) {
+    return spawnYtdlp(args, opts, SEARCH_TIMEOUT_MS, "Search timeout - try a more specific query");
+}
+
+// Helper class for unified progress parsing and display
+class DownloadProgressManager {
+    constructor() {
+        this.lastPercent = 0;
+        this.lastUpdate = 0;
+        this.UPDATE_INTERVAL = 2500;
+    }
+
+    parseProgress(data) {
+        if (!data) return null;
+        if (typeof data === "string") data = { raw: data };
+
+        let percent = null;
+        let speed = null;
+        let eta = null;
+
+        if (typeof data.percent === "number") {
+            percent = data.percent;
+        } else if (typeof data.raw === "string") {
+            // Regex optimization: use pre-compiled regex if possible, or simple checks
+            const raw = data.raw;
+            // Optimized patterns
+            const patterns = [
+                 // [download]   2.3% of  227.22MiB at  100.00KiB/s ETA 37:53
+                 /\[download\]\s+(\d+(?:\.\d+)?)%\s+of\s+[\w\.~]+\s+at\s+([\w\.\/]+)\s+ETA\s+(\d+:\d+(?::\d+)?)/,
+                 // [download] 100% of  227.22MiB in 00:00:05 at 40.63MiB/s
+                 /\[download\]\s+(\d+(?:\.\d+)?)%\s+of\s+[\w\.~]+\s+in\s+[\d:]+\s+at\s+([\w\.\/]+)/,
+                 // Fallback
+                 /(\d+(?:\.\d+)?)%/
+            ];
+
+            for (const pattern of patterns) {
+                const match = raw.match(pattern);
+                if (match) {
+                    percent = parseFloat(match[1]);
+                    speed = match[2] || data.speed;
+                    eta = match[3] || data.eta;
+                    break;
+                }
+            }
+        }
+
+        if (percent !== null && !isNaN(percent)) {
+            return { percent, speed, eta };
+        }
+        return null;
+    }
+
+    shouldUpdate(percent) {
+        const now = Date.now();
+        const timeDiff = now - this.lastUpdate;
+        const percentDiff = percent - this.lastPercent;
+
+        if (percent === 100 || (percentDiff >= 5 && timeDiff > this.UPDATE_INTERVAL) || !this.lastUpdate) {
+            this.lastPercent = percent;
+            this.lastUpdate = now;
+            return true;
+        }
+        return false;
+    }
+
+    createProgressBar(percent) {
+        const total = 15;
+        const progress = Math.round((percent / 100) * total);
+        const empty = total - progress;
+        return `[${'='.repeat(progress)}${' '.repeat(empty)}]`;
+    }
 }
 
 // Get info JSON for url or search query. Accepts "ytsearch1:..." style query too.
@@ -625,18 +785,28 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
         ];
 
         const proc = spawn(YTDLP_BIN, args, { shell: false });
-
         let stderr = "";
 
+        // Performance Optimization: Reduced logging and direct buffering
         proc.stdout.on("data", d => {
             const line = d.toString().trim();
-            console.log("downloadSingleTo [DOWNLOAD STDOUT RAW]", line);
+
+            // Only log non-progress lines or errors to reduce I/O
+            if (!line.includes('[download]') || line.includes('error')) {
+                 console.log("yt-dlp:", line);
+            }
 
             if (progressCb) {
-                try { progressCb(line); } 
-                catch (err) { console.error("downloadSingleTo [PROGRESS_CB ERROR]", err.message); }
+                // Use setImmediate to not block the event loop with progress updates
+                setImmediate(() => {
+                    try { progressCb(line); }
+                    catch (err) { /* ignore progress cb errors */ }
+                });
             }
-            console.log("downloadSingleTo [DOWNLOAD STDOUT]", line);
+        });
+
+        proc.stderr.on("data", d => {
+            stderr += d.toString();
         });
 
         // Timeout, falls Download hängt
@@ -962,21 +1132,18 @@ client.on("interactionCreate", async interaction => {
                     // erstes Lied sofort abspielen
                     const [firstEntry, ...restEntries] = orderedEntries;
 
-                    // restliche Tracks lazy in Queue hinzufügen
-                    for (const e of restEntries) {
-                        queue.songs.push({
-                            requesterId: interaction.user.id,
-                            title: e.title || "Unbekannt",
-                            filepath: null,
-                            url: e.url,
-                            duration: e.duration || null,
-                            thumbnail: e.thumbnail || null,
-                            playlistTitle
-                        });
-                    }
+                    // Create playlist progress message
+                    const progressEmbed = new EmbedBuilder()
+                        .setTitle(`⬇️ Playlist Download: ${playlistTitle}`)
+                        .setDescription(`Bereite Download von ${restEntries.length} Songs vor...`)
+                        .setColor(0x1DB954);
 
-                    // Funktion für sicheres Abspielen einzelner Tracks
-                    async function safePlay(entry) {
+                    const progressMsg = await safeFollowUp(interaction, { embeds: [progressEmbed] });
+                    queue.playlistProgressMsg = progressMsg;
+                    queue.lastProgressUpdate = Date.now();
+
+                    // Funktion für sicheres Abspielen des ersten Tracks (mit normalem Download)
+                    async function safePlayFirst(entry) {
                         try {
                             await handleSingleUrlPlay(interaction, entry.url);
                         } catch (err) {
@@ -985,15 +1152,30 @@ client.on("interactionCreate", async interaction => {
                             if (restEntries.length > 0) {
                                 const nextEntry = restEntries.shift();
                                 await safeFollowUp(interaction, `⚠️ Fehler bei Track "${entry.title}", überspringe zu "${nextEntry.title}"`);
-                                await safePlay(nextEntry);
+                                await safePlayFirst(nextEntry);
                             } else {
                                 await safeFollowUp(interaction, "⚠️ Alle Tracks der Playlist fehlerhaft oder nicht verfügbar.");
                             }
                         }
                     }
 
-                    // starte erstes Lied
-                    await safePlay(firstEntry);
+                    // 1. Starte erstes Lied sofort (Download im Vordergrund, damit Musik spielt)
+                    await safePlayFirst(firstEntry);
+
+                    // 2. Füge Rest zur Queue hinzu und starte Hintergrund-Download
+                    for (const e of restEntries) {
+                        const track = {
+                            requesterId: interaction.user.id,
+                            title: e.title || "Unbekannt",
+                            filepath: null,
+                            url: e.url,
+                            duration: e.duration || null,
+                            thumbnail: e.thumbnail || null,
+                            playlistTitle
+                        };
+                        queue.songs.push(track);
+                        backgroundDownloader.addToQueue(guildId, track);
+                    }
 
                     let msg = `➕ Playlist **${playlistTitle}** (${entries.length} Einträge) zur Queue hinzugefügt.`;
                     if (startIndex > 0) {
@@ -1566,100 +1748,23 @@ if (audioCache.has(url)) {
     downloadMessages.push(progressMsg);
     
 
-    // Progress callback every 5%
-    // Progress callback (akzeptiert sowohl String als auch Objekt)
+    // Progress callback (unified logic)
+    const progressManager = new DownloadProgressManager();
     const progressCb = (data) => {
-        console.log("[PROGRESS_CB ENTER]", data);
-        const now = Date.now();
-
         try {
-            if (typeof data === "string") data = { raw: data };
-            let percent = null;
+            const parsed = progressManager.parseProgress(data);
+            if (parsed && progressManager.shouldUpdate(parsed.percent)) {
+                const percent = parsed.percent;
+                const bar = progressManager.createProgressBar(percent);
+                const description = `${bar} ${percent.toFixed(0)}%${parsed.speed ? ` (${parsed.speed})` : ''}${parsed.eta ? ` ETA: ${parsed.eta}` : ''}`;
 
-            if (data && typeof data === "object") {
-                // Neues Format von downloadSingleTo
-                if (typeof data.percent === "number") {
-                    percent = data.percent;
-                    console.log(`[PROGRESS CB] ✅ Direct percent found: ${percent}%`);
-                } else if (typeof data.raw === "string") {
-                    // Fallback: Parse aus raw string mit verbesserter Regex
-                    console.log(`[PROGRESS CB] 🔍 Parsing raw string: "${data.raw}"`);
-                    const patterns = [
-                        // Echtes yt-dlp Format: [download]   2.3% of  227.22MiB at  100.00KiB/s ETA 37:53
-                        /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+at\s+([\d\.]+\w+\/s)\s+ETA\s+(\d{1,2}:\d{2}(?::\d{2})?)/,
-                        // Format mit "in": [download] 100% of  227.22MiB in 00:00:05 at 40.63MiB/s
-                        /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+in\s+\d{1,2}:\d{2}(?::\d{2})?\s+at\s+([\d\.]+\w+\/s)/,
-                        // Einfaches Format: [download] 100% of  227.22MiB
-                        /\[download\]\s+(\d{1,3}(?:\.\d+)?)%/,
-                        // Fallback
-                        /(\d{1,3}(?:\.\d+)?)%/
-                    ];
-                    
-                    let matched = false;
-                    for (let i = 0; i < patterns.length; i++) {
-                        const pattern = patterns[i];
-                        const match = data.raw.match(pattern);
-                        if (match) {
-                            percent = parseFloat(match[1]);
-                            const speed = match[2] || null;
-                            const eta = match[3] || null;
-                            
-                            // Update data object mit extrahierten Werten
-                            if (speed) data.speed = speed;
-                            if (eta) data.eta = eta;
-                            
-                            console.log(`[PROGRESS CB] ✅ Pattern ${i+1} matched: ${percent}% (speed: ${speed}, eta: ${eta})`);
-                            matched = true;
-                            break;
-                        }
-                    }
-                    
-                    if (!matched) {
-                        console.log(`[PROGRESS CB] ❌ No pattern matched for: "${data.raw}"`);
-                    }
-                }
-            } else if (typeof data === "string") {
-                // Legacy string-form
-                console.log(`[PROGRESS CB] Legacy string: ${data}`);
-                const match = data.match(/(\d{1,3}(?:\.\d+)?)%/);
-                if (match) {
-                    percent = parseFloat(match[1]);
-                }
-            }
-
-            if (percent !== null && !isNaN(percent) && percent >= 0 && percent <= 100) {
-                console.log(`[PROGRESS UPDATE] Valid percent: ${percent}%, lastPercent: ${progressCb.lastPercent}`);
-                // Update mit 3% Abstand UND Zeitabstand (oder 100%)
-                const timeDiff = now - (progressCb.lastUpdate || 0);
-                const percentDiff = percent - (progressCb.lastPercent || 0);
-
-                if (percent === 100 || (percentDiff >= 3 && timeDiff > PROGRESS_EDIT_INTERVAL_MS) || !progressCb.lastPercent) {
-                    progressCb.lastPercent = percent;
-                    progressCb.lastUpdate = now;
-                    try {
-                        const description = `${percent.toFixed(0)}% abgeschlossen${data.speed ? ` (${data.speed})` : ''}${data.eta ? ` ETA: ${data.eta}` : ''}`;
-                        console.log(`[PROGRESS UPDATE] 🔄 Updating Discord message: "${description}"`);
-                        progressEmbed.setDescription(description);
-                        progressMsg.edit({ embeds: [progressEmbed] }).then(() => {
-                            console.log(`[PROGRESS UPDATE] ✅ Discord message updated successfully`);
-                        }).catch((err) => {
-                            console.warn(`[PROGRESS UPDATE] ❌ Discord message update failed:`, err.message);
-                        });
-                        console.log(`[PROGRESS UPDATE] ${percent.toFixed(1)}% completed`);
-                    } catch (e) {
-                        console.warn("[PROGRESS UPDATE ERROR]", e.message);
-                    }
-                } else {
-                    console.log(`[PROGRESS UPDATE] ⏭️ Skipping update (${percent}% - last: ${progressCb.lastPercent}%)`);
-                }
-            } else {
-                console.log(`[PROGRESS DEBUG] ❌ Invalid or no percent found. Data:`, data);
+                progressEmbed.setDescription(description);
+                progressMsg.edit({ embeds: [progressEmbed] }).catch(() => {});
             }
         } catch (e) {
             console.warn("[PROGRESS CB ERROR]", e?.message || e);
         }
     };
-    progressCb.lastPercent = 0;
 
     const downloadPromise = downloadSingleTo(filepath, url, progressCb)
         .then(res => {
