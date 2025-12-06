@@ -42,7 +42,7 @@ const MAX_URL_LENGTH = 2048;
 function sanitizeString(input) {
     if (typeof input !== 'string') return '';
     // Entferne potentiell gefährliche Zeichen
-    return input.replace(/[<>"|&;$`\\]/g, '').trim();
+    return input.replace(/[<>"|;$`\\]/g, '').trim();
 }
 
 // Prüft, ob eine Interaction noch gültig ist
@@ -96,7 +96,7 @@ function validateUrl(urlString) {
         }
         
         // Prüfe auf gefährliche Zeichen in der URL
-        if (/[<>"|&;$`\\]/.test(urlString)) return false;
+        if (/[<>"|;$`\\]/.test(urlString)) return false;
         
         return true;
     } catch {
@@ -434,9 +434,9 @@ class BackgroundDownloader {
                 const filepath = path.join(DOWNLOAD_DIR, tempFilename);
 
                 // Download with progress
+                const progressManager = new DownloadProgressManager();
                 await downloadSingleTo(filepath, track.url, (data) => {
                      // Parse progress using our unified manager
-                     const progressManager = new DownloadProgressManager();
                      const parsed = progressManager.parseProgress(data);
                      if (parsed && progressManager.shouldUpdate(parsed.percent)) {
                          this.updatePlaylistProgress(guildId, track, parsed.percent, parsed.speed);
@@ -1748,100 +1748,23 @@ if (audioCache.has(url)) {
     downloadMessages.push(progressMsg);
     
 
-    // Progress callback every 5%
-    // Progress callback (akzeptiert sowohl String als auch Objekt)
+    // Progress callback (unified logic)
+    const progressManager = new DownloadProgressManager();
     const progressCb = (data) => {
-        console.log("[PROGRESS_CB ENTER]", data);
-        const now = Date.now();
-
         try {
-            if (typeof data === "string") data = { raw: data };
-            let percent = null;
+            const parsed = progressManager.parseProgress(data);
+            if (parsed && progressManager.shouldUpdate(parsed.percent)) {
+                const percent = parsed.percent;
+                const bar = progressManager.createProgressBar(percent);
+                const description = `${bar} ${percent.toFixed(0)}%${parsed.speed ? ` (${parsed.speed})` : ''}${parsed.eta ? ` ETA: ${parsed.eta}` : ''}`;
 
-            if (data && typeof data === "object") {
-                // Neues Format von downloadSingleTo
-                if (typeof data.percent === "number") {
-                    percent = data.percent;
-                    console.log(`[PROGRESS CB] ✅ Direct percent found: ${percent}%`);
-                } else if (typeof data.raw === "string") {
-                    // Fallback: Parse aus raw string mit verbesserter Regex
-                    console.log(`[PROGRESS CB] 🔍 Parsing raw string: "${data.raw}"`);
-                    const patterns = [
-                        // Echtes yt-dlp Format: [download]   2.3% of  227.22MiB at  100.00KiB/s ETA 37:53
-                        /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+at\s+([\d\.]+\w+\/s)\s+ETA\s+(\d{1,2}:\d{2}(?::\d{2})?)/,
-                        // Format mit "in": [download] 100% of  227.22MiB in 00:00:05 at 40.63MiB/s
-                        /\[download\]\s+(\d{1,3}(?:\.\d+)?)%\s+of\s+(?:~\s*)?[\d\.]+\w+\s+in\s+\d{1,2}:\d{2}(?::\d{2})?\s+at\s+([\d\.]+\w+\/s)/,
-                        // Einfaches Format: [download] 100% of  227.22MiB
-                        /\[download\]\s+(\d{1,3}(?:\.\d+)?)%/,
-                        // Fallback
-                        /(\d{1,3}(?:\.\d+)?)%/
-                    ];
-                    
-                    let matched = false;
-                    for (let i = 0; i < patterns.length; i++) {
-                        const pattern = patterns[i];
-                        const match = data.raw.match(pattern);
-                        if (match) {
-                            percent = parseFloat(match[1]);
-                            const speed = match[2] || null;
-                            const eta = match[3] || null;
-                            
-                            // Update data object mit extrahierten Werten
-                            if (speed) data.speed = speed;
-                            if (eta) data.eta = eta;
-                            
-                            console.log(`[PROGRESS CB] ✅ Pattern ${i+1} matched: ${percent}% (speed: ${speed}, eta: ${eta})`);
-                            matched = true;
-                            break;
-                        }
-                    }
-                    
-                    if (!matched) {
-                        console.log(`[PROGRESS CB] ❌ No pattern matched for: "${data.raw}"`);
-                    }
-                }
-            } else if (typeof data === "string") {
-                // Legacy string-form
-                console.log(`[PROGRESS CB] Legacy string: ${data}`);
-                const match = data.match(/(\d{1,3}(?:\.\d+)?)%/);
-                if (match) {
-                    percent = parseFloat(match[1]);
-                }
-            }
-
-            if (percent !== null && !isNaN(percent) && percent >= 0 && percent <= 100) {
-                console.log(`[PROGRESS UPDATE] Valid percent: ${percent}%, lastPercent: ${progressCb.lastPercent}`);
-                // Update mit 3% Abstand UND Zeitabstand (oder 100%)
-                const timeDiff = now - (progressCb.lastUpdate || 0);
-                const percentDiff = percent - (progressCb.lastPercent || 0);
-
-                if (percent === 100 || (percentDiff >= 3 && timeDiff > PROGRESS_EDIT_INTERVAL_MS) || !progressCb.lastPercent) {
-                    progressCb.lastPercent = percent;
-                    progressCb.lastUpdate = now;
-                    try {
-                        const description = `${percent.toFixed(0)}% abgeschlossen${data.speed ? ` (${data.speed})` : ''}${data.eta ? ` ETA: ${data.eta}` : ''}`;
-                        console.log(`[PROGRESS UPDATE] 🔄 Updating Discord message: "${description}"`);
-                        progressEmbed.setDescription(description);
-                        progressMsg.edit({ embeds: [progressEmbed] }).then(() => {
-                            console.log(`[PROGRESS UPDATE] ✅ Discord message updated successfully`);
-                        }).catch((err) => {
-                            console.warn(`[PROGRESS UPDATE] ❌ Discord message update failed:`, err.message);
-                        });
-                        console.log(`[PROGRESS UPDATE] ${percent.toFixed(1)}% completed`);
-                    } catch (e) {
-                        console.warn("[PROGRESS UPDATE ERROR]", e.message);
-                    }
-                } else {
-                    console.log(`[PROGRESS UPDATE] ⏭️ Skipping update (${percent}% - last: ${progressCb.lastPercent}%)`);
-                }
-            } else {
-                console.log(`[PROGRESS DEBUG] ❌ Invalid or no percent found. Data:`, data);
+                progressEmbed.setDescription(description);
+                progressMsg.edit({ embeds: [progressEmbed] }).catch(() => {});
             }
         } catch (e) {
             console.warn("[PROGRESS CB ERROR]", e?.message || e);
         }
     };
-    progressCb.lastPercent = 0;
 
     const downloadPromise = downloadSingleTo(filepath, url, progressCb)
         .then(res => {
