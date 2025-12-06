@@ -96,7 +96,7 @@ function validateUrl(urlString) {
         }
         
         // Prüfe auf gefährliche Zeichen in der URL
-        if (/[<>"|&;$`\\]/.test(urlString)) return false;
+        if (/[<>"|;$`\\]/.test(urlString)) return false;
         
         return true;
     } catch {
