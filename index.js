@@ -1246,9 +1246,15 @@ client.on("interactionCreate", async interaction => {
                 }
 
                 // direct url - bereinige URL von Parametern
-                const cleanUrl = cleanYouTubeUrl(sanitizedQuery);
+                let cleanUrl = cleanYouTubeUrl(sanitizedQuery);
+
+                // Fallback: Wenn cleanYouTubeUrl fehlschlägt, aber es eine gültige Media-URL ist (SoundCloud, Twitch, etc.)
                 if (!cleanUrl) {
-                    return await safeFollowUp(interaction, "❌ Ungültige YouTube URL.");
+                    if (isValidMediaUrl(sanitizedQuery)) {
+                        cleanUrl = sanitizedQuery;
+                    } else {
+                        return await safeFollowUp(interaction, "❌ Ungültige URL.");
+                    }
                 }
                 
                 // Prüfe ob es eine URL mit list= Parameter ist, aber als einzelnes Video behandelt werden soll
@@ -1878,8 +1884,26 @@ async function ensureNextTrackDownloadedAndPlay(guildId) {
     } catch (e) {
         q.isDownloading = false;
         console.error("[NEXT DOWNLOAD ERROR]", e?.message || e);
+
+        // Error Counting
+        q.consecutiveErrors = (q.consecutiveErrors || 0) + 1;
+
+        if (q.consecutiveErrors >= 5) {
+             if (q.lastInteractionChannel) {
+                 q.lastInteractionChannel.send("🛑 Zu viele Fehler hintereinander (5). Stoppe Wiedergabe um Spam zu vermeiden.").catch(()=>{});
+             }
+             // Cleanup
+             q.player.stop();
+             try { q.connection.destroy(); } catch {}
+             guildQueues.delete(guildId);
+             return;
+        }
+
         // notify and remove track
-        if (q.lastInteractionChannel) q.lastInteractionChannel.send(`⚠️ Fehler beim Laden von ${next.title || next.url}: ${e.message}`).catch(()=>{});
+        if (q.lastInteractionChannel) {
+             q.lastInteractionChannel.send(`⚠️ Fehler beim Laden von ${truncateMessage(next.title || next.url, 100)}: ${e.message}`).catch(()=>{});
+        }
+
         q.songs.shift();
         // try next with delay to prevent spam
         setTimeout(() => ensureNextTrackDownloadedAndPlay(guildId), 500);
@@ -1960,5 +1984,10 @@ module.exports = {
     audioCache,
     downloadSingleTo,
     getPlaylistEntries,
-    client // for stubbing
+    client, // for stubbing
+    cleanPlaylistUrl,
+    isRealPlaylist,
+    isYouTubePlaylistUrl,
+    validateUrl,
+    cleanYouTubeUrl
 };
