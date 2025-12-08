@@ -1705,7 +1705,7 @@ if (audioCache.has(url)) {
     const cacheEmbed = new EmbedBuilder()
         .setTitle("✅ Song aus Cache geladen")
         .setDescription(`[${title}](${url})`)
-        .addFields({ name: "Dauer", value: duration, inline: true })
+        .addFields({ name: "Dauer", value: String(duration), inline: true })
         .setColor(0x00FF00);
     
     await interaction.followUp({ embeds: [cacheEmbed] });
@@ -1907,12 +1907,12 @@ function playNextInGuild(guildId) {
                 .setTitle("Now Playing")
                 .setDescription(`[${track.title || path.basename(track.filepath)}](${track.url})`) // <-- Hotlink hier
                 .addFields(
-                    { name: "Dauer", value: track.duration || "unbekannt", inline: true },
+                    { name: "Dauer", value: String(track.duration || "unbekannt"), inline: true },
                     { name: "Angefragt von", value: `<@${track.requesterId}>`, inline: true },
                 )
                 .setTimestamp();
 
-            if (track.playlistTitle) embed.addFields({ name: "Playlist", value: track.playlistTitle, inline: false });
+            if (track.playlistTitle) embed.addFields({ name: "Playlist", value: String(track.playlistTitle), inline: false });
 
             q.lastInteractionChannel.send({ embeds: [embed] }).then(msg => {
                 // Speichere die "Now Playing" Nachricht für spätere Löschung
