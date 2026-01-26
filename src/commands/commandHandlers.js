@@ -208,7 +208,7 @@ async function handleRefreshCommand(context) {
  * Handles the /clearcache command
  */
 async function handleClearcacheCommand(context) {
-    const { interaction, aud audioCache } = context;
+    const { interaction, audioCache } = context;
 
     if (!interaction.member.permissions.has("Administrator")) {
         return interaction.reply({ content: "❌ Administrator-Berechtigung erforderlich.", ephemeral: true });
