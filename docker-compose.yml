@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   musicbot:
     build:
@@ -10,24 +8,24 @@ services:
 
     environment:
       # Discord Bot Configuration
-      - TOKEN=${DISCORD_TOKEN}
+      - TOKEN=${TOKEN}
 
       # yt-dlp Configuration
-      - YTDLP_PATH=/opt/venv/bin/yt-dlp
-      - DOWNLOAD_DIR=/app/downloads
+      - YTDLP_PATH=${YTDLP_PATH:-/opt/venv/bin/yt-dlp}
+      - DOWNLOAD_DIR=${DOWNLOAD_DIR:-/app/downloads}
 
       # Cache Configuration
-      - MAX_CACHE=200
+      - MAX_CACHE=${MAX_CACHE:-200}
 
       # Timeout Configuration (in seconds)
-      - DOWNLOAD_TIMEOUT_SEC=120
-      - SEARCH_TIMEOUT_SEC=30
+      - DOWNLOAD_TIMEOUT_SEC=${DOWNLOAD_TIMEOUT_SEC:-120}
+      - SEARCH_TIMEOUT_SEC=${SEARCH_TIMEOUT_SEC:-30}
 
       # Logging
-      - LOG_LEVEL=info
+      - LOG_LEVEL=${LOG_LEVEL:-info}
 
       # Node Environment
-      - NODE_ENV=production
+      - NODE_ENV=${NODE_ENV:-production}
 
     volumes:
       # Persistent storage for downloads and cache
