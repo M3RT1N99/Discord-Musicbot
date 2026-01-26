@@ -49,4 +49,4 @@ ENV NODE_OPTIONS=--unhandled-rejections=warn
 ENV FORCE_COLOR=1
 ENV NODE_BUFFER_SIZE=16777216
 
-CMD ["node", "--max-old-space-size=512", "--unhandled-rejections=warn", "index.js"]
+CMD ["node", "--max-old-space-size=512", "--unhandled-rejections=warn", "src/index.js"]
