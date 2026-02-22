@@ -10,7 +10,7 @@ child_process.spawn = (cmd, args) => {
     const proc = new EventEmitter();
     proc.stdout = new EventEmitter();
     proc.stderr = new EventEmitter();
-    proc.kill = () => {};
+    proc.kill = () => { };
 
     // Simulate output for search or info
     if (args.includes('ytsearch10:')) {
@@ -53,20 +53,20 @@ try {
         filename: voicePath,
         loaded: true,
         exports: {
-            joinVoiceChannel: () => ({ subscribe: () => {} }),
+            joinVoiceChannel: () => ({ subscribe: () => { } }),
             createAudioPlayer: () => ({
-                on: () => {},
+                on: () => { },
                 state: { status: 'Idle' },
-                play: () => {}
+                play: () => { }
             }),
-            createAudioResource: () => ({ volume: { setVolume: () => {} } }),
+            createAudioResource: () => ({ volume: { setVolume: () => { } } }),
             NoSubscriberBehavior: { Pause: 'pause' },
             AudioPlayerStatus: { Idle: 'idle', Playing: 'playing' }
         }
     };
-} catch (e) {}
+} catch (e) { }
 
-const muse = require('../index.js');
+const muse = require('../src/index.js');
 
 async function runTest() {
     console.log("Running test: /play command");
@@ -88,17 +88,17 @@ async function runTest() {
         guildId: guildId,
         user: { id: "user1" },
         member: { voice: { channel: { id: "voice1", guild: { voiceAdapterCreator: {} } } } },
-        channel: { id: "text1", send: async () => {} },
+        channel: { id: "text1", send: async () => { } },
         options: { getString: () => "http://youtube.com/watch?v=12345678901" }, // Valid 11 char ID
         createdTimestamp: Date.now(),
-        deferReply: async () => {},
+        deferReply: async () => { },
         editReply: async (msg) => { replyContent = msg; },
         reply: async (msg) => { replyContent = msg; },
         followUp: async (msg) => {
             // console.log("[TEST] FollowUp:", msg);
             if (msg.embeds) replyContent = msg.embeds[0].description;
             else replyContent = msg;
-            return { delete: async () => {} };
+            return { delete: async () => { } };
         },
         guild: { voiceAdapterCreator: {} }
     };
@@ -124,7 +124,7 @@ async function runTest() {
             // console.log("[TEST] Search FollowUp:", msg);
             if (typeof msg === 'string') replyContent = msg;
             else if (msg.content) replyContent = msg.content;
-            return { id: 'msg1', delete: async () => {} };
+            return { id: 'msg1', delete: async () => { } };
         }
     };
 

@@ -1,0 +1,58 @@
+services:
+  musicbot:
+    build:
+      context: .
+      dockerfile: dockerfile
+    container_name: discord-musicbot
+    restart: unless-stopped
+
+    environment:
+      # Discord Bot Configuration
+      - TOKEN=${TOKEN}
+
+      # yt-dlp Configuration (fixed in Docker container)
+      - YTDLP_PATH=/opt/venv/bin/yt-dlp
+      - DOWNLOAD_DIR=/app/downloads
+
+      # User-configurable settings from .env
+      - MAX_CACHE=${MAX_CACHE:-200}
+      - DOWNLOAD_TIMEOUT_SEC=${DOWNLOAD_TIMEOUT_SEC:-120}
+      - SEARCH_TIMEOUT_SEC=${SEARCH_TIMEOUT_SEC:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - LOG_DIR=${LOG_DIR:-/tmp} # Set to /tmp for maximum stability (no host I/O)
+      - NODE_ENV=${NODE_ENV:-production}
+
+    volumes:
+      # Downloads directory - bind mount to host path from .env
+      - ${DOWNLOAD_HOST_PATH:-./downloads}:/app/downloads
+
+      # Logs directory (optional: can also be bind mount)
+      - ${LOGS_HOST_PATH:-./logs}:/app/logs
+      # Optional: Mount source code for development
+      # - ./src:/app/src:ro
+
+    networks:
+      - musicbot-network
+
+    # Allow setting process priorities for audio threads
+    cap_add:
+      - SYS_NICE
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+
+    healthcheck:
+      test: [ "CMD-SHELL", "pgrep -x node > /dev/null || exit 1" ]
+      interval: 300s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+networks:
+  musicbot-network:
+    driver: bridge

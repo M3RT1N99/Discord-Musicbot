@@ -20,7 +20,7 @@ child_process.spawn = (command, args, options) => {
         const proc = new EventEmitter();
         proc.stdout = new EventEmitter();
         proc.stderr = new EventEmitter();
-        proc.kill = () => {};
+        proc.kill = () => { };
 
         // Delay close to simulate download time
         setTimeout(() => {
@@ -43,21 +43,21 @@ try {
         filename: voicePath,
         loaded: true,
         exports: {
-            joinVoiceChannel: () => ({ subscribe: () => {} }),
+            joinVoiceChannel: () => ({ subscribe: () => { } }),
             createAudioPlayer: () => ({
-                on: () => {},
+                on: () => { },
                 state: { status: 'Idle' },
-                play: () => {}
+                play: () => { }
             }),
-            createAudioResource: () => ({ volume: { setVolume: () => {} } }),
+            createAudioResource: () => ({ volume: { setVolume: () => { } } }),
             NoSubscriberBehavior: { Pause: 'pause' },
             AudioPlayerStatus: { Idle: 'idle', Playing: 'playing' }
         }
     };
-} catch (e) {}
+} catch (e) { }
 
 // Import
-const muse = require('../index.js');
+const muse = require('../src/index.js');
 
 async function runTest() {
     console.log("Running test: Race Condition in ensureNextTrackDownloadedAndPlay");
@@ -69,9 +69,9 @@ async function runTest() {
         songs: [],
         player: {
             state: { status: "Idle" },
-            play: () => {}
+            play: () => { }
         },
-        connection: { destroy: () => {} },
+        connection: { destroy: () => { } },
         lastInteractionChannel: { send: () => Promise.resolve() },
         volume: 50
     };
