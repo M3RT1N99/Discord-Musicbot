@@ -118,21 +118,37 @@ function isRealPlaylist(url) {
 
         if (!listParam) return false;
 
-        // Auto-Mix/Radio lists (start with RD)
+        // Auto-Mix/Radio lists (start with RD) are NOT real playlists
         if (listParam.startsWith('RD')) {
-            console.log(`[PLAYLIST CHECK] Auto-Mix/Radio detected: ${listParam}`);
+            return false;
+        }
+
+        // Real playlists (start with PL, UU, OL, etc.)
+        if (listParam.startsWith('PL') || listParam.startsWith('UU') || listParam.startsWith('OL')) {
             return true;
         }
 
-        // Real playlists (start with PL or UU)
-        if (listParam.startsWith('PL') || listParam.startsWith('UU')) {
-            console.log(`[PLAYLIST CHECK] Real playlist detected: ${listParam}`);
-            return true;
-        }
-
-        // Other playlist types treated as real
-        console.log(`[PLAYLIST CHECK] Other playlist type: ${listParam}`);
+        // Other playlist types: treat as real
         return true;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Checks if URL contains both a single video ID and a playlist parameter
+ * @param {string} url - URL to check
+ * @returns {boolean} True if URL has both video ID and list parameter
+ */
+function hasVideoAndPlaylist(url) {
+    try {
+        const urlObj = new URL(url);
+        const hasList = urlObj.searchParams.has('list');
+        if (!hasList) return false;
+
+        // Check for video ID in various URL formats
+        const hasVideo = /(?:youtube\.com\/watch\?.*v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/)[a-zA-Z0-9_-]{11}/.test(url);
+        return hasVideo;
     } catch {
         return false;
     }
@@ -143,5 +159,7 @@ module.exports = {
     isYouTubePlaylistUrl,
     cleanYouTubeUrl,
     cleanPlaylistUrl,
-    isRealPlaylist
+    isRealPlaylist,
+    hasVideoAndPlaylist
 };
+

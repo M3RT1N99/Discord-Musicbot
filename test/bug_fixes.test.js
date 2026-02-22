@@ -22,7 +22,7 @@ child_process.spawn = (command, args, options) => {
     const proc = new EventEmitter();
     proc.stdout = new EventEmitter();
     proc.stderr = new EventEmitter();
-    proc.kill = () => {};
+    proc.kill = () => { };
 
     // Simulate successful execution asynchronously
     setTimeout(() => {
@@ -49,9 +49,9 @@ try {
         filename: voicePath,
         loaded: true,
         exports: {
-            joinVoiceChannel: () => ({ subscribe: () => {} }),
-            createAudioPlayer: () => ({ on: () => {} }),
-            createAudioResource: () => ({ volume: { setVolume: () => {} } }),
+            joinVoiceChannel: () => ({ subscribe: () => { } }),
+            createAudioPlayer: () => ({ on: () => { } }),
+            createAudioResource: () => ({ volume: { setVolume: () => { } } }),
             NoSubscriberBehavior: { Pause: 'pause' },
             AudioPlayerStatus: { Idle: 'idle', Playing: 'playing' }
         }
@@ -60,8 +60,9 @@ try {
     console.log("[TEST] Could not resolve @discordjs/voice, mocking might fail if not found.");
 }
 
-// Import the module
-const muse = require('../index.js');
+// Import the modules
+const muse = require('../src/index.js');
+const { ensureNextTrackDownloadedAndPlay } = require('../src/queue/QueueManager');
 
 async function runTest() {
     console.log("Running test: ensureNextTrackDownloadedAndPlay (real function) integration");
@@ -79,13 +80,13 @@ async function runTest() {
             requesterId: "user1"
         }],
         player: {
-            state: { status: "Idle", resource: { volume: { setVolume: () => {} } } },
+            state: { status: "Idle", resource: { volume: { setVolume: () => { } } } },
             play: (resource) => {
                 console.log("[TEST] Player.play called");
                 playCalled = true;
             }
         },
-        connection: { destroy: () => {} },
+        connection: { destroy: () => { } },
         lastInteractionChannel: { send: () => Promise.resolve() },
         volume: 50
     };
@@ -106,7 +107,7 @@ async function runTest() {
     };
 
     try {
-        await muse.ensureNextTrackDownloadedAndPlay(guildId);
+        await ensureNextTrackDownloadedAndPlay(guildId);
 
         console.log("Function executed.");
 
@@ -117,7 +118,7 @@ async function runTest() {
 
         const q = muse.guildQueues.get(guildId);
         if (q) {
-             assert.strictEqual(q.songs.length, 0, "Song should have been removed from queue after playing");
+            assert.strictEqual(q.songs.length, 0, "Song should have been removed from queue after playing");
         }
 
         console.log("Test Passed!");

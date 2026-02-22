@@ -8,6 +8,7 @@ const { isYouTubePlaylistUrl, cleanPlaylistUrl } = require('../utils/urlCleaner'
 const { formatDuration } = require('../utils/formatting');
 const fs = require('fs');
 const path = require('path');
+const logger = require('../utils/logger');
 
 /**
  * Spawns yt-dlp process with security measures
@@ -28,7 +29,8 @@ function spawnYtdlp(args, opts = {}, timeoutMs = DOWNLOAD_TIMEOUT_MS, errorMsg =
             return true;
         });
 
-        const proc = spawn(YTDLP_BIN, safeArgs, {
+        // Spawn yt-dlp with lowest CPU priority to avoid audio stutter
+        const proc = spawn('nice', ['-n', '19', YTDLP_BIN, ...safeArgs], {
             ...opts,
             stdio: ["ignore", "pipe", "pipe"],
             shell: false // Prevent shell injection
@@ -131,7 +133,7 @@ async function getPlaylistEntries(playlistUrl) {
     } catch (e) {
         // If yt-dlp errors but returned JSON, try to parse anyway
         if (e.stdout && e.stdout.trim().length > 0) {
-            console.warn(`[PLAYLIST WARN] yt-dlp exited with ${e.code}, but returned data. Attempting parse.`);
+            logger.warn(`[PLAYLIST WARN] yt-dlp exited with ${e.code}, but returned data. Attempting parse.`);
             stdout = e.stdout;
         } else {
             throw e;
@@ -186,13 +188,13 @@ async function getVideoInfo(urlOrId) {
     }
 
     const args = ["-J", "--no-warnings", "--ignore-errors", urlOrId];
-    console.log(`[VIDEO INFO] Getting info for: ${urlOrId}`);
+    logger.info(`[VIDEO INFO] Getting info for: ${urlOrId}`);
     const start = Date.now();
 
     try {
         const { stdout } = await spawnYtdlpSearch(args); // Use short timeout for info query
         const elapsed = Date.now() - start;
-        console.log(`[VIDEO INFO] Success in ${elapsed}ms`);
+        logger.info(`[VIDEO INFO] Success in ${elapsed}ms`);
 
         const info = JSON.parse(stdout);
         return {
@@ -202,7 +204,7 @@ async function getVideoInfo(urlOrId) {
         };
     } catch (err) {
         const elapsed = Date.now() - start;
-        console.error(`[VIDEO INFO] Failed after ${elapsed}ms:`, err.message);
+        logger.error(`[VIDEO INFO] Failed after ${elapsed}ms: ${err.message}`);
         throw err;
     }
 }
@@ -299,21 +301,23 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
         }
 
         const args = [
-            "-f", "bestaudio",
+            "-f", "bestaudio/best",
             "--extract-audio",
-            "--audio-format", "m4a",
-            "--audio-quality", "320K",
+            "--audio-format", "opus",
+            "--audio-quality", "5",
             "--socket-timeout", "60",
             "--retries", "3",
             "--no-warnings",
             "--no-playlist",
             "--ignore-errors",
             "--newline", // Important for line-by-line output
+            "--limit-rate", "3M", // Throttle to prevent network saturation
             "-o", filepath,
             urlOrId
         ];
 
-        const proc = spawn(YTDLP_BIN, args, { shell: false });
+        // Low-priority spawn (nice 19) to not stutter audio playback
+        const proc = spawn('nice', ['-n', '19', YTDLP_BIN, ...args], { shell: false });
         let stderr = "";
 
         // Performance optimization: Reduced logging and direct buffering
@@ -322,7 +326,7 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
 
             // Only log non-progress lines or errors to reduce I/O
             if (!line.includes('[download]') || line.includes('error')) {
-                console.log("yt-dlp:", line);
+                logger.debug(`yt-dlp: ${line}`);
             }
 
             if (progressCb) {

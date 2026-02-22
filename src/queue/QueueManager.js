@@ -1,13 +1,15 @@
-// src/queue/QueueManager.js
 // Global queue management for all guilds
 
-const { createAudioPlayer, createAudioResource, NoSubscriberBehavior, AudioPlayerStatus } = require('@discordjs/voice');
+const { createAudioPlayer, createAudioResource, NoSubscriberBehavior, AudioPlayerStatus, StreamType } = require('@discordjs/voice');
+const { spawn } = require('child_process');
+const { PassThrough } = require('stream');
 const { EmbedBuilder } = require('discord.js');
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { DOWNLOAD_DIR } = require('../config/constants');
 const { downloadSingleTo } = require('../download/ytdlp');
+const logger = require('../utils/logger');
 
 // Global guild queues map
 const guildQueues = new Map();
@@ -21,7 +23,7 @@ const guildQueues = new Map();
 function createPlayerForGuild(guildId, connection) {
     const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
 
-    player.on("error", err => console.error(`[PLAYER ERROR][${guildId}]`, err?.message || err));
+    player.on("error", err => logger.error(`[PLAYER ERROR][${guildId}] ${err?.message || err}`));
 
     player.on(AudioPlayerStatus.Idle, () => {
         // Delete "Now Playing" message when song finishes
@@ -44,9 +46,10 @@ function createPlayerForGuild(guildId, connection) {
             }
         }
 
-        // Ensure next track is downloaded and played
-        ensureNextTrackDownloadedAndPlay(guildId).catch(e =>
-            console.error("[ENSURE NEXT ERROR]", e?.message || e)
+        // Ensure next track is downloaded and played (pass audioCache from queue)
+        const queue2 = guildQueues.get(guildId);
+        ensureNextTrackDownloadedAndPlay(guildId, queue2?.audioCache).catch(e =>
+            logger.error(`[ENSURE NEXT ERROR] ${e?.message || e}`)
         );
     });
 
@@ -96,7 +99,7 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache) {
     }
 
     // Build filepath
-    const filename = `song_${Date.now()}_${randomUUID().slice(0, 8)}.m4a`;
+    const filename = `song_${Date.now()}_${randomUUID().slice(0, 8)}.opus`;
     const filepath = path.join(DOWNLOAD_DIR, filename);
 
     // Notify channel
@@ -106,7 +109,7 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache) {
 
     try {
         q.isDownloading = true;
-        console.log("[CALLING downloadSingleTo]", filepath, next.url);
+        logger.info(`[DOWNLOAD] ${filepath} from ${next.url}`);
         await downloadSingleTo(filepath, next.url, null);
 
         if (audioCache) {
@@ -118,7 +121,7 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache) {
         playNextInGuild(guildId);
     } catch (e) {
         q.isDownloading = false;
-        console.error("[NEXT DOWNLOAD ERROR]", e?.message || e);
+        logger.error(`[NEXT DOWNLOAD ERROR] ${e?.message || e}`);
 
         // Error counting
         q.consecutiveErrors = (q.consecutiveErrors || 0) + 1;
@@ -157,39 +160,135 @@ function playNextInGuild(guildId) {
     const track = q.songs.shift();
     if (!track) return;
 
-    // Set current track for looping logic
+    // Save previous track for "back" button, set current
+    q.previousTrack = q.currentTrack || null;
     q.currentTrack = track;
 
-    const resource = createAudioResource(track.filepath, { inlineVolume: true });
-    resource.volume.setVolume((q.volume || 50) / 100);
-    q.player.play(resource);
+    // Clean up any existing buffering process
+    if (q.currentFfmpeg) {
+        try { q.currentFfmpeg.kill('SIGKILL'); } catch { }
+        q.currentFfmpeg = null;
+    }
 
-    // Send now playing embed
+    // Use ffmpeg to convert to Raw PCM (s16le) - the most stable timing format
+    const vol = (q.volume || 50) / 100;
+    const ffmpeg = spawn('ffmpeg', [
+        '-loglevel', 'error',
+        '-i', track.filepath,
+        '-af', 'aresample=async=1', // Sync clock: prevents warping/leiern
+        '-f', 's16le',
+        '-ar', '48000',
+        '-ac', '2',
+        'pipe:1'
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+
+    // Aggressive PCM Pre-Buffering: Load entire song into RAM before playback
+    const chunks = [];
+    let bufferedBytes = 0;
+    let isPlaying = false;
+    const MAX_PREBUFFER = 150 * 1024 * 1024; // 150MB cap (~13min audio)
+
+    const startPlayback = () => {
+        if (isPlaying || chunks.length === 0) return;
+        isPlaying = true;
+
+        const fullBuffer = Buffer.concat(chunks);
+        const stream = new PassThrough();
+        stream.end(fullBuffer);
+
+        const resource = createAudioResource(stream, {
+            inputType: StreamType.Raw,
+            inlineVolume: true
+        });
+
+        // Restore instant volume control
+        resource.volume.setVolume(vol);
+        q.currentResource = resource;
+
+        q.player.play(resource);
+        renderNowPlaying(guildId, track); // Show UI only when playing starts
+    };
+
+    q.currentFfmpeg = ffmpeg;
+
+    ffmpeg.stdout.on('data', (chunk) => {
+        chunks.push(chunk);
+        bufferedBytes += chunk.length;
+        // If file is huge, start playing after 10MB to avoid OOM
+        if (bufferedBytes > MAX_PREBUFFER) startPlayback();
+    });
+
+    ffmpeg.on('close', (code) => {
+        q.currentFfmpeg = null;
+        if (code !== 0 && chunks.length === 0) {
+            logger.error(`[FFMPEG ERROR] Failed to buffer track ${track.title}`);
+            playNextInGuild(guildId); // Skip to next on total failure
+            return;
+        }
+        startPlayback();
+    });
+
+    ffmpeg.on('error', (err) => {
+        q.currentFfmpeg = null;
+        logger.error(`[FFMPEG SPAWN ERROR] ${err.message}`);
+        playNextInGuild(guildId);
+    });
+}
+
+/**
+ * Renders and sends the Now Playing embed
+ */
+function renderNowPlaying(guildId, track) {
+    const q = guildQueues.get(guildId);
+    if (!q) return;
+
+    // Send fancy Now Playing embed with player controls
     if (q.lastInteractionChannel) {
         try {
+            const volPercent = q.volume || 50;
+            const volBar = '█'.repeat(Math.round(volPercent / 10)) + '░'.repeat(10 - Math.round(volPercent / 10));
+            const queuePos = q.songs.length > 0 ? `${q.songs.length} Song${q.songs.length > 1 ? 's' : ''} in Queue` : 'Queue leer';
+
             const embed = new EmbedBuilder()
-                .setTitle("Now Playing")
-                .setDescription(`[${track.title || path.basename(track.filepath)}](${track.url})`)
+                .setTitle('🎶 Now Playing')
+                .setDescription(`**[${track.title || path.basename(track.filepath)}](${track.url || ''})**`)
                 .addFields(
-                    { name: "Dauer", value: String(track.duration || "unbekannt"), inline: true },
-                    { name: "Angefragt von", value: `<@${track.requesterId}>`, inline: true }
+                    { name: '⏱️ Dauer', value: String(track.duration || 'unbekannt'), inline: true },
+                    { name: '👤 Angefragt von', value: `<@${track.requesterId}>`, inline: true },
+                    { name: '🔊 Lautstärke', value: `\`${volBar}\` ${volPercent}%`, inline: true }
                 )
+                .setColor(0x1DB954)
                 .setTimestamp();
 
             if (track.playlistTitle) {
-                embed.addFields({ name: "Playlist", value: String(track.playlistTitle), inline: false });
+                embed.addFields({ name: '📋 Playlist', value: String(track.playlistTitle), inline: true });
+            }
+            embed.setFooter({ text: `🎵 ${queuePos} • ${q.loopMode !== 'off' ? (q.loopMode === 'song' ? '🔂 Repeat Song' : '🔁 Repeat Queue') : '➡️ Normal'}` });
+
+            const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`np_prev|${guildId}`).setEmoji('⏮️').setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder().setCustomId(`np_pause|${guildId}`).setEmoji('⏯️').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId(`np_skip|${guildId}`).setEmoji('⏭️').setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder().setCustomId(`np_voldn|${guildId}`).setEmoji('🔉').setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder().setCustomId(`np_volup|${guildId}`).setEmoji('🔊').setStyle(ButtonStyle.Secondary)
+            );
+
+            // Delete old "Now Playing" message before sending new one
+            if (q.nowPlayingMessage) {
+                q.nowPlayingMessage.delete().catch(() => { });
+                q.nowPlayingMessage = null;
             }
 
-            q.lastInteractionChannel.send({ embeds: [embed] }).then(msg => {
-                // Save "Now Playing" message for later deletion
+            q.lastInteractionChannel.send({ embeds: [embed], components: [row] }).then(msg => {
                 q.nowPlayingMessage = msg;
             }).catch(() => { });
         } catch (e) {
-            console.warn("[EMBED SEND ERROR]", e.message);
+            logger.warn(`[EMBED SEND ERROR] ${e.message}`);
         }
     }
 
-    console.log(`[PLAY][${guildId}] Playing: ${track.title || track.filepath}`);
+    logger.info(`[PLAY][${guildId}] Playing: ${track.title || track.filepath}`);
 }
 
 /**

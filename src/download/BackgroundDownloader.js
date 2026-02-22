@@ -8,6 +8,7 @@ const { DOWNLOAD_DIR } = require('../config/constants');
 const { downloadSingleTo, getVideoInfo } = require('./ytdlp');
 const DownloadProgressManager = require('./ProgressManager');
 const { truncateMessage } = require('../utils/formatting');
+const logger = require('../utils/logger');
 
 /**
  * Background Downloader for playlist tracks
@@ -44,6 +45,8 @@ class BackgroundDownloader {
             const item = this.queue.shift();
             const { guildId, track } = item;
 
+            logger.debug(`[BG-PROCESS] Starting: ${track.url} (Remaining: ${this.queue.length})`);
+
             // Skip if track already has filepath or guild gone
             const guildQueue = guildQueues.get(guildId);
             if (!guildQueue || track.filepath) continue;
@@ -60,9 +63,10 @@ class BackgroundDownloader {
                 continue;
             }
 
+
             try {
                 // Generate filename
-                const tempFilename = `song_${Date.now()}_${randomUUID().slice(0, 8)}.m4a`;
+                const tempFilename = `song_${Date.now()}_${randomUUID().slice(0, 8)}.opus`;
                 const filepath = path.join(DOWNLOAD_DIR, tempFilename);
 
                 // Download with progress
@@ -89,15 +93,13 @@ class BackgroundDownloader {
 
                 this.audioCache.set(track.url, filepath, { title: track.title, duration: track.duration });
                 this.updatePlaylistProgress(guildId, track, 100);
-
+                logger.debug(`[BG-PROCESS] Finished: ${track.url}`);
             } catch (err) {
-                console.warn(`[BG DOWNLOAD ERROR] ${track.url}: ${err.message}`);
-                // Optional: remove failed track from guild queue?
-                // For now we keep it, ensureNextTrack will try again or skip
+                logger.warn(`[BG DOWNLOAD ERROR] ${track.url}: ${err.message}`);
             }
 
-            // Small delay to yield event loop
-            await new Promise(r => setTimeout(r, 200));
+            // Longer delay to yield event loop and reduce CPU contention
+            await new Promise(r => setTimeout(r, 1000));
         }
 
         this.active = false;

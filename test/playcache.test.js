@@ -10,7 +10,7 @@ child_process.spawn = () => {
     const proc = new EventEmitter();
     proc.stdout = new EventEmitter();
     proc.stderr = new EventEmitter();
-    proc.kill = () => {};
+    proc.kill = () => { };
     // Auto-close
     setTimeout(() => proc.emit('close', 0), 10);
     return proc;
@@ -25,20 +25,20 @@ try {
         filename: voicePath,
         loaded: true,
         exports: {
-            joinVoiceChannel: () => ({ subscribe: () => {} }),
+            joinVoiceChannel: () => ({ subscribe: () => { } }),
             createAudioPlayer: () => ({
-                on: () => {},
+                on: () => { },
                 state: { status: 'Idle' },
-                play: () => {}
+                play: () => { }
             }),
-            createAudioResource: () => ({ volume: { setVolume: () => {} } }),
+            createAudioResource: () => ({ volume: { setVolume: () => { } } }),
             NoSubscriberBehavior: { Pause: 'pause' },
             AudioPlayerStatus: { Idle: 'idle', Playing: 'playing' }
         }
     };
-} catch (e) {}
+} catch (e) { }
 
-const muse = require('../index.js');
+const muse = require('../src/index.js');
 
 async function runTest() {
     console.log("Running test: /playcache command logic");

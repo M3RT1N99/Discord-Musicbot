@@ -8,7 +8,7 @@ child_process.spawn = (cmd, args) => {
     const proc = new EventEmitter();
     proc.stdout = new EventEmitter();
     proc.stderr = new EventEmitter();
-    proc.kill = () => {};
+    proc.kill = () => { };
 
     // Simulate output for playlist
     if (args.includes('--flat-playlist')) {
@@ -40,7 +40,7 @@ child_process.spawn = (cmd, args) => {
     return proc;
 };
 
-const muse = require('../index.js');
+const muse = require('../src/index.js');
 
 async function runTest() {
     console.log("Running test: getPlaylistEntries robustness and limits");

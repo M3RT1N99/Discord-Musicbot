@@ -3,6 +3,7 @@
 
 const { joinVoiceChannel } = require('@discordjs/voice');
 const { JOIN_RETRIES } = require('../config/constants');
+const logger = require('../utils/logger');
 
 /**
  * Joins voice channel with retry logic
@@ -21,11 +22,11 @@ async function joinVoiceChannelWithRetry(voiceChannel, retries = JOIN_RETRIES) {
                 adapterCreator: voiceChannel.guild.voiceAdapterCreator
             });
 
-            console.log(`[VOICE] Joined channel: ${voiceChannel.name} in guild: ${voiceChannel.guild.name}`);
+            logger.info(`[VOICE] Joined channel: ${voiceChannel.name} in guild: ${voiceChannel.guild.name}`);
             return connection;
         } catch (e) {
             lastErr = e;
-            console.warn(`[JOIN] Attempt ${attempt + 1}/${retries + 1} failed:`, e?.message || e);
+            logger.warn(`[JOIN] Attempt ${attempt + 1}/${retries + 1} failed: ${e?.message || e}`);
 
             // Small delay before retry
             if (attempt < retries) {
@@ -44,9 +45,9 @@ async function joinVoiceChannelWithRetry(voiceChannel, retries = JOIN_RETRIES) {
 function leaveVoiceChannel(connection) {
     try {
         connection.destroy();
-        console.log("[VOICE] Left voice channel");
+        logger.info("[VOICE] Left voice channel");
     } catch (e) {
-        console.error("[VOICE] Error leaving channel:", e?.message || e);
+        logger.error(`[VOICE] Error leaving channel: ${e?.message || e}`);
     }
 }
 

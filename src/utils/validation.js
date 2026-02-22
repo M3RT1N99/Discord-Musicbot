@@ -2,6 +2,7 @@
 // Input validation and security utilities
 
 const { BLOCKED_URL_PATTERNS, MAX_QUERY_LENGTH, MAX_URL_LENGTH } = require('../config/constants');
+const logger = require('./logger');
 
 /**
  * Sanitizes string input by removing potentially dangerous characters
@@ -38,7 +39,7 @@ async function safeFollowUp(interaction, content, options = {}) {
         const canFollowUp = interactionAge < 14 * 60 * 1000; // 14 minutes
 
         if (!canFollowUp) {
-            console.warn("[FOLLOWUP TIMEOUT] Interaction too old for follow-up");
+            logger.warn("[FOLLOWUP TIMEOUT] Interaction too old for follow-up");
             return null;
         }
 
@@ -50,9 +51,9 @@ async function safeFollowUp(interaction, content, options = {}) {
         return await interaction.followUp(typeof content === 'string' ? { content, ...options } : content);
     } catch (error) {
         if (error.code === 10062) {
-            console.warn("[FOLLOWUP EXPIRED] Interaction token expired");
+            logger.warn("[FOLLOWUP EXPIRED] Interaction token expired");
         } else {
-            console.error("[FOLLOWUP ERROR]", error);
+            logger.error(`[FOLLOWUP ERROR] ${error}`);
         }
         return null;
     }

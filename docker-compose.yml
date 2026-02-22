@@ -10,64 +10,48 @@ services:
       # Discord Bot Configuration
       - TOKEN=${TOKEN}
 
-      # yt-dlp Configuration
-      - YTDLP_PATH=${YTDLP_PATH:-/opt/venv/bin/yt-dlp}
-      - DOWNLOAD_DIR=${DOWNLOAD_DIR:-/app/downloads}
+      # yt-dlp Configuration (fixed in Docker container)
+      - YTDLP_PATH=/opt/venv/bin/yt-dlp
+      - DOWNLOAD_DIR=/app/downloads
 
-      # Cache Configuration
+      # User-configurable settings from .env
       - MAX_CACHE=${MAX_CACHE:-200}
-
-      # Timeout Configuration (in seconds)
       - DOWNLOAD_TIMEOUT_SEC=${DOWNLOAD_TIMEOUT_SEC:-120}
       - SEARCH_TIMEOUT_SEC=${SEARCH_TIMEOUT_SEC:-30}
-
-      # Logging
       - LOG_LEVEL=${LOG_LEVEL:-info}
-
-      # Node Environment
+      - LOG_DIR=${LOG_DIR:-/tmp} # Set to /tmp for maximum stability (no host I/O)
       - NODE_ENV=${NODE_ENV:-production}
 
     volumes:
-      # Persistent storage for downloads and cache
-      - musicbot-downloads:/app/downloads
-      - musicbot-logs:/app/logs
-      # Optional: Mount .env file if you prefer file-based config
-      # - ./.env:/app/.env:ro
+      # Downloads directory - bind mount to host path from .env
+      - ${DOWNLOAD_HOST_PATH:-./downloads}:/app/downloads
 
+      # Logs directory (optional: can also be bind mount)
+      - ${LOGS_HOST_PATH:-./logs}:/app/logs
       # Optional: Mount source code for development
       # - ./src:/app/src:ro
-
-      # Network mode for better performance (optional)
-      # Use host network if you have issues with voice connections
-      # network_mode: host
 
     networks:
       - musicbot-network
 
-    # Resource limits (adjust based on your needs)
+    # Allow setting process priorities for audio threads
+    cap_add:
+      - SYS_NICE
+
+    # Resource limits
     deploy:
       resources:
         limits:
-          cpus: '2'
           memory: 1G
         reservations:
-          cpus: '0.5'
           memory: 512M
 
-    # Health check
     healthcheck:
-      test: [ "CMD", "node", "-e", "process.exit(0)" ]
-      interval: 30s
-      timeout: 10s
+      test: [ "CMD-SHELL", "pgrep -x node > /dev/null || exit 1" ]
+      interval: 300s
+      timeout: 5s
       retries: 3
       start_period: 40s
-
-volumes:
-  # Persistent volumes for data
-  musicbot-downloads:
-    driver: local
-  musicbot-logs:
-    driver: local
 
 networks:
   musicbot-network:

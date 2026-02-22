@@ -28,15 +28,16 @@ const logger = winston.createLogger({
             )
         }),
         // File transport for errors
+        // TIP: Use /tmp for LOG_DIR to avoid Windows/Host I/O lags during playback
         new winston.transports.File({
-            filename: path.join(process.env.DOWNLOAD_DIR || '/tmp/muse_downloads', 'error.log'),
+            filename: path.join(process.env.LOG_DIR || '/tmp', 'error.log'),
             level: 'error',
             maxsize: 5242880, // 5MB
             maxFiles: 5
         }),
         // File transport for all logs
         new winston.transports.File({
-            filename: path.join(process.env.DOWNLOAD_DIR || '/tmp/muse_downloads', 'combined.log'),
+            filename: path.join(process.env.LOG_DIR || '/tmp', 'combined.log'),
             maxsize: 5242880, // 5MB
             maxFiles: 5
         })

@@ -46,7 +46,9 @@ const {
     handleRefreshCommand,
     handleClearcacheCommand,
     handleRepeatSingleCommand,
-    handleRepeatCommand
+    handleRepeatCommand,
+    handlePlaylistChoiceButton,
+    handleNowPlayingButton
 } = require('./commands/commandHandlers');
 
 // --------------------------- Slash Command Definitions ---------------------------
@@ -118,6 +120,23 @@ client.once("ready", async () => {
         logger.info('='.repeat(60));
         logger.info('✨ Bot is ready!');
         logger.info('='.repeat(60));
+
+        // --- Heartbeat Logger (Every 30s to diagnose lag) ---
+        setInterval(() => {
+            const memory = process.memoryUsage();
+            const activeQueues = guildQueues.size;
+            const bgStats = backgroundDownloader.getStats();
+
+            logger.debug(`[HEARTBEAT] Memory: ${Math.round(memory.rss / 1024 / 1024)}MB RSS, ${Math.round(memory.heapUsed / 1024 / 1024)}MB Heap | Queues: ${activeQueues} | BG-Downloads: ${bgStats.isActive ? 'Active' : 'Idle'} (${bgStats.queueLength} pending)`);
+
+            // Log specific guild states if active
+            for (const [guildId, q] of guildQueues) {
+                if (q.player.state.status === 'playing') {
+                    const buffering = q.currentFfmpeg ? 'Buffering' : 'Ready';
+                    logger.debug(`[STATUS][${guildId}] Playing: ${q.currentTrack?.title?.substring(0, 30)}... | State: ${buffering}`);
+                }
+            }
+        }, 30000).unref();
     } catch (err) {
         logger.error("[COMMANDS] Registration failed:", err);
     }
@@ -146,6 +165,49 @@ client.on("guildDelete", guild => {
 
 // --------------------------- Interaction Handler ---------------------------
 client.on("interactionCreate", async interaction => {
+    // --- Button interactions ---
+    if (interaction.isButton()) {
+        const customId = interaction.customId;
+        if (customId.startsWith('play_single|') || customId.startsWith('play_playlist|')) {
+            const context = {
+                interaction,
+                audioCache,
+                searchCache,
+                rateLimiter,
+                backgroundDownloader,
+                guildQueues,
+                createPlayerForGuild,
+                createGuildQueue,
+                deleteGuildQueue,
+                logger
+            };
+            try {
+                await handlePlaylistChoiceButton(context);
+            } catch (err) {
+                logger.error(`[BUTTON ERROR] ${err.message}`);
+            }
+        } else if (customId.startsWith('np_')) {
+            const context = {
+                interaction,
+                audioCache,
+                searchCache,
+                rateLimiter,
+                backgroundDownloader,
+                guildQueues,
+                createPlayerForGuild,
+                createGuildQueue,
+                deleteGuildQueue,
+                logger
+            };
+            try {
+                await handleNowPlayingButton(context);
+            } catch (err) {
+                logger.error(`[NP BUTTON ERROR] ${err.message}`);
+            }
+        }
+        return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     const commandName = interaction.commandName;
@@ -233,6 +295,27 @@ client.on("interactionCreate", async interaction => {
         }
     }
 });
+
+// --------------------------- Graceful Shutdown ---------------------------
+function gracefulShutdown(signal) {
+    logger.info(`[SHUTDOWN] Received ${signal}, cleaning up...`);
+
+    // Destroy all voice connections
+    for (const [guildId] of guildQueues) {
+        try { deleteGuildQueue(guildId); } catch { }
+    }
+
+    // Force save cache
+    try { audioCache.save(); } catch { }
+
+    // Destroy client
+    client.destroy();
+    logger.info('[SHUTDOWN] Cleanup complete, exiting.');
+    process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // --------------------------- Error Handlers ---------------------------
 process.on("uncaughtException", err => {
