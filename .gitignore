@@ -48,7 +48,7 @@ jspm_packages/
 # Downloads and cache
 /tmp/
 downloads/
-cache/
+/cache/
 *.mp3
 *.mp4
 *.m4a
