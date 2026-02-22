@@ -11,8 +11,8 @@ const logger = require('./logger');
  */
 function sanitizeString(input) {
     if (typeof input !== 'string') return '';
-    // Remove potentially dangerous characters
-    return input.replace(/[<>"|;$`\\]/g, '').trim();
+    // Remove potentially dangerous characters (including newlines to prevent log injection)
+    return input.replace(/[<>"|;$`\\\r\n]/g, '').trim();
 }
 
 /**
