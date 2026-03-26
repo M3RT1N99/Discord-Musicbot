@@ -1,6 +1,7 @@
 // src/utils/validation.js
 // Input validation and security utilities
 
+const { MessageFlags } = require('discord.js');
 const { BLOCKED_URL_PATTERNS, MAX_QUERY_LENGTH, MAX_URL_LENGTH } = require('../config/constants');
 const logger = require('./logger');
 
@@ -11,8 +12,11 @@ const logger = require('./logger');
  */
 function sanitizeString(input) {
     if (typeof input !== 'string') return '';
-    // Remove potentially dangerous characters (including newlines to prevent log injection)
-    return input.replace(/[<>"|;$`\\\r\n]/g, '').trim();
+    // Remove dangerous characters, newlines (log injection), and Unicode control chars
+    return input
+        .replace(/[<>"|;$`\\\r\n]/g, '')
+        .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF\u0000-\u001F]/g, '')
+        .trim();
 }
 
 /**
@@ -43,12 +47,20 @@ async function safeFollowUp(interaction, content, options = {}) {
             return null;
         }
 
-        // If deferred, use editReply for first response
-        if (interaction.deferred && !interaction.replied) {
-            return await interaction.editReply(typeof content === 'string' ? { content, ...options } : content);
+        // Build payload and inject SuppressNotifications flag
+        let payload;
+        if (typeof content === 'string') {
+            payload = { content, ...options, flags: [MessageFlags.SuppressNotifications] };
+        } else {
+            payload = { ...content, flags: [MessageFlags.SuppressNotifications] };
         }
 
-        return await interaction.followUp(typeof content === 'string' ? { content, ...options } : content);
+        // If deferred, use editReply for first response
+        if (interaction.deferred && !interaction.replied) {
+            return await interaction.editReply(payload);
+        }
+
+        return await interaction.followUp(payload);
     } catch (error) {
         if (error.code === 10062) {
             logger.warn("[FOLLOWUP EXPIRED] Interaction token expired");

@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Temp-Verzeichnis für Downloads erstellen
-RUN mkdir -p /tmp/muse_downloads
+RUN mkdir -p /tmp/musicbot_downloads
 
 # yt-dlp in Virtual Environment installieren (nur im Container)
 RUN python3 -m venv /opt/venv && \
@@ -44,8 +44,8 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY package*.json ./
 COPY . .
 
-# Entrypoint script ausführbar machen
-RUN chmod +x /app/entrypoint.sh
+# Entrypoint script: fix Windows line endings + make executable
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Node.js Output unbuffered machen für echte Logs
 ENV NODE_OPTIONS=--unhandled-rejections=warn

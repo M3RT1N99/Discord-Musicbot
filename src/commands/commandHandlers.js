@@ -6,7 +6,7 @@ const path = require('path');
 const { randomUUID } = require('crypto');
 const { EmbedBuilder, REST, Routes, PermissionsBitField, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
-const { TOKEN, DOWNLOAD_DIR, MAX_QUERY_LENGTH, SEARCH_CACHE_TIMEOUT } = require('../config/constants');
+const { TOKEN, DOWNLOAD_DIR, MAX_QUERY_LENGTH, SEARCH_CACHE_TIMEOUT, MAX_PENDING_CHOICES, MAX_SONGS_PER_QUEUE } = require('../config/constants');
 const { joinVoiceChannelWithRetry } = require('../voice/VoiceManager');
 const { downloadSingleTo, getVideoInfo, searchYouTubeVideos, getPlaylistEntries } = require('../download/ytdlp');
 const { isValidMediaUrl, validateSearchQuery, sanitizeString, isInteractionValid, safeFollowUp } = require('../utils/validation');
@@ -125,8 +125,14 @@ async function handleSingleUrlPlay(context, url) {
 
     downloadSingleTo(filepath, url, progressCb)
         .then(async () => {
+            // Re-fetch queue in case it was deleted during download (/stop, disconnect)
+            const currentQueue = guildQueues.get(guildId);
             audioCache.set(url, filepath, { title: video.title, duration: video.duration });
-            queue.songs.push({ requesterId: interaction.user.id, title: video.title, filepath, url, duration: video.duration });
+            if (!currentQueue) {
+                logger.warn(`[DOWNLOAD] Queue gone for guild ${guildId}, discarding downloaded track`);
+                return;
+            }
+            currentQueue.songs.push({ requesterId: interaction.user.id, title: video.title, filepath, url, duration: video.duration });
 
             const finishMsg = await safeFollowUp(interaction, `✅ Download fertig: **${video.title}** — zur Queue hinzugefügt.`);
             downloadMessages.push(finishMsg);
@@ -138,7 +144,7 @@ async function handleSingleUrlPlay(context, url) {
                 }
             }, 5000);
 
-            if (queue.player.state.status !== AudioPlayerStatus.Playing) {
+            if (currentQueue.player.state.status !== AudioPlayerStatus.Playing) {
                 await ensureNextTrackDownloadedAndPlay(guildId, audioCache);
             }
         })
@@ -203,6 +209,13 @@ async function handlePlayCommand(context) {
 
         // Store URL with short key (customId max 100 chars)
         const choiceKey = randomUUID().slice(0, 8);
+
+        // Evict oldest if at capacity
+        if (pendingPlaylistChoices.size >= MAX_PENDING_CHOICES) {
+            const oldestKey = pendingPlaylistChoices.keys().next().value;
+            pendingPlaylistChoices.delete(oldestKey);
+        }
+
         pendingPlaylistChoices.set(choiceKey, { url: sanitizedQuery, userId: interaction.user.id, createdAt: Date.now() });
 
         const row = new ActionRowBuilder().addComponents(
@@ -298,8 +311,13 @@ async function handlePlayCommand(context) {
         // Play first track immediately
         await handleSingleUrlPlay(context, firstEntry.url);
 
-        // Add rest in background
+        // Add rest in background (respect queue size limit)
+        let addedCount = 0;
         for (const e of restEntries) {
+            if (queue.songs.length >= MAX_SONGS_PER_QUEUE) {
+                logger.warn(`[QUEUE LIMIT][${interaction.guildId}] Queue full at ${MAX_SONGS_PER_QUEUE}, skipping remaining playlist entries`);
+                break;
+            }
             const track = {
                 requesterId: interaction.user.id,
                 title: e.title || 'Unbekannt',
@@ -311,9 +329,11 @@ async function handlePlayCommand(context) {
             };
             queue.songs.push(track);
             backgroundDownloader.addToQueue(interaction.guildId, track);
+            addedCount++;
         }
 
-        let msg = `➕ Playlist **${playlistTitle}** (${entries.length} Einträge) zur Queue hinzugefügt.`;
+        let msg = `➕ Playlist **${playlistTitle}** (${addedCount}/${restEntries.length} Einträge) zur Queue hinzugefügt.`;
+        if (addedCount < restEntries.length) msg += `\n⚠️ Queue-Limit erreicht (max. ${MAX_SONGS_PER_QUEUE}).`;
         if (startIndex > 0) msg += `\n▶️ Starte bei Track #${startIndex + 1}.`;
         await safeFollowUp(interaction, msg);
         return;
@@ -670,6 +690,7 @@ async function handlePlaycacheCommand(context) {
 
     let addedCount = 0;
     for (const [key, val] of allEntries) {
+        if (queue.songs.length >= MAX_SONGS_PER_QUEUE) break;
         if (fs.existsSync(val.filepath)) {
             queue.songs.push({
                 requesterId: interaction.user.id,
@@ -687,7 +708,9 @@ async function handlePlaycacheCommand(context) {
         return interaction.editReply('❌ Keine gültigen Dateien im Cache gefunden.');
     }
 
-    await interaction.editReply(`✅ **${addedCount}** Songs aus dem Cache zur Queue hinzugefügt.`);
+    let replyMsg = `✅ **${addedCount}** Songs aus dem Cache zur Queue hinzugefügt.`;
+    if (queue.songs.length >= MAX_SONGS_PER_QUEUE) replyMsg += `\n⚠️ Queue-Limit erreicht (max. ${MAX_SONGS_PER_QUEUE}).`;
+    await interaction.editReply(replyMsg);
 
     if (queue.player.state.status !== AudioPlayerStatus.Playing) {
         await ensureNextTrackDownloadedAndPlay(interaction.guildId, audioCache);
@@ -873,7 +896,12 @@ async function handlePlaylistChoiceButton(context) {
             await handleSingleUrlPlay(context, firstEntry.url);
 
             const { backgroundDownloader } = context;
+            let addedCount = 0;
             for (const entry of restEntries) {
+                if (queue.songs.length >= MAX_SONGS_PER_QUEUE) {
+                    logger.warn(`[QUEUE LIMIT][${interaction.guildId}] Queue full at ${MAX_SONGS_PER_QUEUE}`);
+                    break;
+                }
                 const track = {
                     requesterId: interaction.user.id,
                     title: entry.title || 'Unbekannt',
@@ -884,10 +912,12 @@ async function handlePlaylistChoiceButton(context) {
                 };
                 queue.songs.push(track);
                 backgroundDownloader.addToQueue(interaction.guildId, track);
+                addedCount++;
             }
             backgroundDownloader.processQueue();
 
-            let msg = `➕ Playlist **${playlistTitle}** (${entries.length} Einträge) zur Queue hinzugefügt.`;
+            let msg = `➕ Playlist **${playlistTitle}** (${addedCount}/${restEntries.length} Einträge) zur Queue hinzugefügt.`;
+            if (addedCount < restEntries.length) msg += `\n⚠️ Queue-Limit erreicht (max. ${MAX_SONGS_PER_QUEUE}).`;
             if (startIndex > 0) msg += `\n▶️ Starte bei Track #${startIndex + 1}.`;
             await safeFollowUp(interaction, msg);
 
@@ -959,6 +989,44 @@ async function handleNowPlayingButton(context) {
             } catch { }
             break;
         }
+        case 'np_savequeue': {
+            // Collect all tracks: current + queued
+            const allTracks = [];
+            if (queue.currentTrack) allTracks.push(queue.currentTrack);
+            allTracks.push(...queue.songs);
+
+            const tracksWithUrl = allTracks.filter(t => t.url);
+            if (tracksWithUrl.length === 0) {
+                return interaction.reply({ content: '📋 Queue ist leer — nichts zu speichern.', ephemeral: true });
+            }
+
+            // Format track list
+            const lines = tracksWithUrl.map((t, i) =>
+                `${i + 1}. ${t.title || 'Unbekannt'} — ${t.url}`
+            );
+            const header = `💾 Queue gespeichert (${tracksWithUrl.length} Songs)\n\n`;
+
+            // If short enough, send as text message
+            if (header.length + lines.join('\n').length < 1900) {
+                return interaction.reply({
+                    content: header + lines.join('\n'),
+                    ephemeral: true
+                });
+            }
+
+            // Otherwise send as .txt file attachment
+            const fileContent = lines.join('\n');
+            const { AttachmentBuilder } = require('discord.js');
+            const attachment = new AttachmentBuilder(
+                Buffer.from(fileContent, 'utf-8'),
+                { name: `queue_${Date.now()}.txt` }
+            );
+            return interaction.reply({
+                content: `💾 Queue gespeichert (${tracksWithUrl.length} Songs):`,
+                files: [attachment],
+                ephemeral: true
+            });
+        }
         default:
             return;
     }
@@ -997,8 +1065,11 @@ async function handleNowPlayingButton(context) {
             new ButtonBuilder().setCustomId(`np_voldn|${guildId}`).setEmoji('🔉').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId(`np_volup|${guildId}`).setEmoji('🔊').setStyle(ButtonStyle.Secondary)
         );
+        const row2 = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`np_savequeue|${guildId}`).setLabel('Queue speichern').setEmoji('💾').setStyle(ButtonStyle.Success)
+        );
 
-        await interaction.update({ embeds: [embed], components: [row] });
+        await interaction.update({ embeds: [embed], components: [row, row2] });
     } catch (e) {
         logger.warn(`[NP BUTTON] ${e.message}`);
         await interaction.deferUpdate().catch(() => { });

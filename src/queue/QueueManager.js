@@ -1,13 +1,13 @@
 // Global queue management for all guilds
 
-const { createAudioPlayer, createAudioResource, NoSubscriberBehavior, AudioPlayerStatus, StreamType } = require('@discordjs/voice');
+const { createAudioPlayer, createAudioResource, NoSubscriberBehavior, AudioPlayerStatus, StreamType, VoiceConnectionStatus } = require('@discordjs/voice');
 const { spawn } = require('child_process');
 const { PassThrough } = require('stream');
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, MessageFlags, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
-const { DOWNLOAD_DIR } = require('../config/constants');
+const { DOWNLOAD_DIR, MAX_SONGS_PER_QUEUE } = require('../config/constants');
 const { downloadSingleTo } = require('../download/ytdlp');
 const logger = require('../utils/logger');
 
@@ -24,6 +24,35 @@ function createPlayerForGuild(guildId, connection) {
     const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
 
     player.on("error", err => logger.error(`[PLAYER ERROR][${guildId}] ${err?.message || err}`));
+
+    // Voice disconnect cleanup — prevent orphaned queues and FFmpeg processes
+    // Use a timeout to allow for temporary disconnects (region switches, brief network issues)
+    let disconnectTimer = null;
+    connection.on(VoiceConnectionStatus.Disconnected, () => {
+        logger.warn(`[VOICE DISCONNECT][${guildId}] Connection lost, waiting 15s for reconnect...`);
+        if (disconnectTimer) clearTimeout(disconnectTimer);
+        disconnectTimer = setTimeout(() => {
+            // Only cleanup if still disconnected (not reconnected)
+            if (connection.state.status === VoiceConnectionStatus.Disconnected ||
+                connection.state.status === VoiceConnectionStatus.Destroyed) {
+                logger.warn(`[VOICE DISCONNECT][${guildId}] No reconnect after 15s, cleaning up`);
+                cleanupGuildResources(guildId);
+            }
+        }, 15000);
+    });
+    connection.on(VoiceConnectionStatus.Ready, () => {
+        // Cancel disconnect cleanup if we reconnected
+        if (disconnectTimer) {
+            clearTimeout(disconnectTimer);
+            disconnectTimer = null;
+            logger.info(`[VOICE RECONNECT][${guildId}] Connection restored`);
+        }
+    });
+    connection.on(VoiceConnectionStatus.Destroyed, () => {
+        if (disconnectTimer) clearTimeout(disconnectTimer);
+        logger.info(`[VOICE DESTROYED][${guildId}] Connection destroyed, cleaning up`);
+        cleanupGuildResources(guildId);
+    });
 
     player.on(AudioPlayerStatus.Idle, () => {
         // Delete "Now Playing" message when song finishes
@@ -61,7 +90,11 @@ function createPlayerForGuild(guildId, connection) {
  * @param {string} guildId - Guild ID
  * @param {object} audioCache - Audio cache instance
  */
-async function ensureNextTrackDownloadedAndPlay(guildId, audioCache) {
+async function ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth = 0) {
+    if (_depth > 10) {
+        logger.warn(`[RECURSION LIMIT][${guildId}] ensureNextTrackDownloadedAndPlay exceeded max depth, stopping`);
+        return;
+    }
     const q = guildQueues.get(guildId);
     if (!q) return;
 
@@ -95,7 +128,7 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache) {
     if (!next.url) {
         // Invalid entry -> drop and try next
         q.songs.shift();
-        return await ensureNextTrackDownloadedAndPlay(guildId, audioCache);
+        return await ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth + 1);
     }
 
     // Build filepath
@@ -104,7 +137,7 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache) {
 
     // Notify channel
     if (q.lastInteractionChannel) {
-        q.lastInteractionChannel.send(`⬇️ Lade: ${next.title || next.url}`.substring(0, 120)).catch(() => { });
+        q.lastInteractionChannel.send({ content: `⬇️ Lade: ${next.title || next.url}`.substring(0, 120), flags: [MessageFlags.SuppressNotifications] }).catch(() => { });
     }
 
     try {
@@ -118,6 +151,7 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache) {
 
         next.filepath = filepath;
         q.isDownloading = false;
+        q.consecutiveErrors = 0; // Reset error counter on success
         playNextInGuild(guildId);
     } catch (e) {
         q.isDownloading = false;
@@ -128,7 +162,7 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache) {
 
         if (q.consecutiveErrors >= 5) {
             if (q.lastInteractionChannel) {
-                q.lastInteractionChannel.send("🛑 Zu viele Fehler hintereinander (5). Stoppe Wiedergabe um Spam zu vermeiden.").catch(() => { });
+                q.lastInteractionChannel.send({ content: "🛑 Zu viele Fehler hintereinander (5). Stoppe Wiedergabe um Spam zu vermeiden.", flags: [MessageFlags.SuppressNotifications] }).catch(() => { });
             }
             // Cleanup
             q.player.stop();
@@ -140,12 +174,12 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache) {
         // Notify and remove track
         if (q.lastInteractionChannel) {
             const msg = `⚠️ Fehler beim Laden von ${next.title || next.url}: ${e.message}`;
-            q.lastInteractionChannel.send(msg.substring(0, 200)).catch(() => { });
+            q.lastInteractionChannel.send({ content: msg.substring(0, 200), flags: [MessageFlags.SuppressNotifications] }).catch(() => { });
         }
 
         q.songs.shift();
         // Try next with delay to prevent spam
-        setTimeout(() => ensureNextTrackDownloadedAndPlay(guildId, audioCache), 500);
+        setTimeout(() => ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth + 1), 500);
     }
 }
 
@@ -166,7 +200,7 @@ function playNextInGuild(guildId) {
 
     // Clean up any existing buffering process
     if (q.currentFfmpeg) {
-        try { q.currentFfmpeg.kill('SIGKILL'); } catch { }
+        safeKillFfmpeg(q.currentFfmpeg);
         q.currentFfmpeg = null;
     }
 
@@ -193,6 +227,8 @@ function playNextInGuild(guildId) {
         isPlaying = true;
 
         const fullBuffer = Buffer.concat(chunks);
+        // Free individual chunks immediately to allow GC (saves ~150MB during playback)
+        chunks.length = 0;
         const stream = new PassThrough();
         stream.end(fullBuffer);
 
@@ -265,13 +301,15 @@ function renderNowPlaying(guildId, track) {
             }
             embed.setFooter({ text: `🎵 ${queuePos} • ${q.loopMode !== 'off' ? (q.loopMode === 'song' ? '🔂 Repeat Song' : '🔁 Repeat Queue') : '➡️ Normal'}` });
 
-            const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId(`np_prev|${guildId}`).setEmoji('⏮️').setStyle(ButtonStyle.Secondary),
                 new ButtonBuilder().setCustomId(`np_pause|${guildId}`).setEmoji('⏯️').setStyle(ButtonStyle.Primary),
                 new ButtonBuilder().setCustomId(`np_skip|${guildId}`).setEmoji('⏭️').setStyle(ButtonStyle.Secondary),
                 new ButtonBuilder().setCustomId(`np_voldn|${guildId}`).setEmoji('🔉').setStyle(ButtonStyle.Secondary),
                 new ButtonBuilder().setCustomId(`np_volup|${guildId}`).setEmoji('🔊').setStyle(ButtonStyle.Secondary)
+            );
+            const row2 = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`np_savequeue|${guildId}`).setLabel('Queue speichern').setEmoji('💾').setStyle(ButtonStyle.Success)
             );
 
             // Delete old "Now Playing" message before sending new one
@@ -280,7 +318,7 @@ function renderNowPlaying(guildId, track) {
                 q.nowPlayingMessage = null;
             }
 
-            q.lastInteractionChannel.send({ embeds: [embed], components: [row] }).then(msg => {
+            q.lastInteractionChannel.send({ embeds: [embed], components: [row, row2], flags: [MessageFlags.SuppressNotifications] }).then(msg => {
                 q.nowPlayingMessage = msg;
             }).catch(() => { });
         } catch (e) {
@@ -324,14 +362,68 @@ function createGuildQueue(guildId, connection, player, channel) {
 }
 
 /**
+ * Safely kills an FFmpeg process with SIGTERM -> SIGKILL fallback
+ * @param {ChildProcess} ffmpeg - FFmpeg process
+ */
+function safeKillFfmpeg(ffmpeg) {
+    if (!ffmpeg || ffmpeg.killed) return;
+    try {
+        ffmpeg.kill('SIGTERM');
+        // Force-kill after 5 seconds if still alive
+        const killTimeout = setTimeout(() => {
+            try { if (!ffmpeg.killed) ffmpeg.kill('SIGKILL'); } catch { }
+        }, 5000);
+        killTimeout.unref();
+    } catch { }
+}
+
+/**
+ * Cleans up all resources for a guild (FFmpeg, player, queue)
+ * @param {string} guildId - Guild ID
+ */
+function cleanupGuildResources(guildId) {
+    const queue = guildQueues.get(guildId);
+    if (!queue) return;
+
+    // Kill FFmpeg process
+    if (queue.currentFfmpeg) {
+        safeKillFfmpeg(queue.currentFfmpeg);
+        queue.currentFfmpeg = null;
+    }
+
+    // Stop player
+    try { queue.player.stop(); } catch { }
+
+    // Clear references to help GC
+    queue.songs.length = 0;
+    queue.currentTrack = null;
+    queue.previousTrack = null;
+    queue.currentResource = null;
+    queue.nowPlayingMessage = null;
+    queue.playlistProgressMsg = null;
+
+    guildQueues.delete(guildId);
+    logger.info(`[CLEANUP][${guildId}] Guild resources cleaned up`);
+}
+
+/**
  * Deletes guild queue
  * @param {string} guildId - Guild ID
  */
 function deleteGuildQueue(guildId) {
     const queue = guildQueues.get(guildId);
     if (queue) {
+        if (queue.currentFfmpeg) {
+            safeKillFfmpeg(queue.currentFfmpeg);
+            queue.currentFfmpeg = null;
+        }
         queue.player.stop();
         try { queue.connection.destroy(); } catch { }
+        queue.songs.length = 0;
+        queue.currentTrack = null;
+        queue.previousTrack = null;
+        queue.currentResource = null;
+        queue.nowPlayingMessage = null;
         guildQueues.delete(guildId);
     }
 }
@@ -343,5 +435,6 @@ module.exports = {
     playNextInGuild,
     getGuildQueue,
     createGuildQueue,
-    deleteGuildQueue
+    deleteGuildQueue,
+    cleanupGuildResources
 };

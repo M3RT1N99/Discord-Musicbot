@@ -1,7 +1,7 @@
 {
-  "name": "muse",
+  "name": "discord-musicbot",
   "version": "2.11.1",
-  "description": "Muse Discord Music Bot - Custom Build",
+  "description": "Discord Musicbot",
   "main": "src/index.js",
   "author": "You",
   "license": "MIT",

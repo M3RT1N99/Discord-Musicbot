@@ -1,7 +1,7 @@
 // src/cache/SearchCache.js
 // Search results caching system
 
-const { SEARCH_CACHE_TIMEOUT } = require('../config/constants');
+const { SEARCH_CACHE_TIMEOUT, MAX_SEARCH_CACHE_ENTRIES } = require('../config/constants');
 
 /**
  * Search results cache with automatic expiration
@@ -21,6 +21,12 @@ class SearchCache {
      * @param {object} data - Cache data
      */
     set(userId, data) {
+        // Evict oldest entries if at capacity
+        if (this.cache.size >= MAX_SEARCH_CACHE_ENTRIES && !this.cache.has(userId)) {
+            const oldestKey = this.cache.keys().next().value;
+            this.cache.delete(oldestKey);
+        }
+
         this.cache.set(userId, {
             ...data,
             timestamp: data.timestamp || Date.now()

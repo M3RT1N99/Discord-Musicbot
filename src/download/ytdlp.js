@@ -37,8 +37,15 @@ function spawnYtdlp(args, opts = {}, timeoutMs = DOWNLOAD_TIMEOUT_MS, errorMsg =
         });
 
         let stdout = "", stderr = "";
+        const MAX_STDERR_LEN = 8192; // Cap stderr at 8KB to prevent memory growth
         proc.stdout.on("data", d => { stdout += d.toString(); });
-        proc.stderr.on("data", d => { stderr += d.toString(); });
+        proc.stderr.on("data", d => {
+            stderr += d.toString();
+            // Keep only last 8KB of stderr to prevent unbounded growth
+            if (stderr.length > MAX_STDERR_LEN) {
+                stderr = stderr.slice(-MAX_STDERR_LEN);
+            }
+        });
 
         const timer = setTimeout(() => {
             proc.kill("SIGKILL");
@@ -319,6 +326,7 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
         // Low-priority spawn (nice 19) to not stutter audio playback
         const proc = spawn('nice', ['-n', '19', YTDLP_BIN, ...args], { shell: false });
         let stderr = "";
+        const MAX_STDERR_LEN = 8192;
 
         // Performance optimization: Reduced logging and direct buffering
         proc.stdout.on("data", d => {
@@ -343,6 +351,9 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
 
         proc.stderr.on("data", d => {
             stderr += d.toString();
+            if (stderr.length > MAX_STDERR_LEN) {
+                stderr = stderr.slice(-MAX_STDERR_LEN);
+            }
         });
 
         // Timeout if download hangs

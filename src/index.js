@@ -94,7 +94,7 @@ const client = new Client({
 });
 
 // --------------------------- Client Ready Event ---------------------------
-client.once("ready", async () => {
+client.once("clientReady", async () => {
     logger.info(`✅ Logged in as ${client.user.tag}`);
     logger.info(`📊 Connected to ${client.guilds.cache.size} guilds`);
 
@@ -129,8 +129,8 @@ client.once("ready", async () => {
 
             logger.debug(`[HEARTBEAT] Memory: ${Math.round(memory.rss / 1024 / 1024)}MB RSS, ${Math.round(memory.heapUsed / 1024 / 1024)}MB Heap | Queues: ${activeQueues} | BG-Downloads: ${bgStats.isActive ? 'Active' : 'Idle'} (${bgStats.queueLength} pending)`);
 
-            // Log specific guild states if active
-            for (const [guildId, q] of guildQueues) {
+            // Log specific guild states if active (snapshot to avoid concurrent modification)
+            for (const [guildId, q] of [...guildQueues]) {
                 if (q.player.state.status === 'playing') {
                     const buffering = q.currentFfmpeg ? 'Buffering' : 'Ready';
                     logger.debug(`[STATUS][${guildId}] Playing: ${q.currentTrack?.title?.substring(0, 30)}... | State: ${buffering}`);
@@ -154,6 +154,25 @@ client.on("guildCreate", async (guild) => {
         logger.info(`[COMMANDS] Registered for new guild ${guild.id}`);
     } catch (err) {
         logger.warn(`[COMMANDS] Failed for new guild ${guild.id}: ${err?.message}`);
+    }
+});
+
+// --------------------------- Auto-Leave when bot is alone in voice ---------------------------
+client.on("voiceStateUpdate", (oldState, newState) => {
+    // Only care about users leaving a voice channel
+    if (!oldState.channel) return;
+
+    const botMember = oldState.guild.members.me;
+    if (!botMember?.voice?.channel) return;
+
+    // Check if the bot's channel is the one someone left
+    if (oldState.channel.id !== botMember.voice.channel.id) return;
+
+    // Count non-bot members still in the channel
+    const humanMembers = oldState.channel.members.filter(m => !m.user.bot).size;
+    if (humanMembers === 0) {
+        logger.info(`[AUTO-LEAVE][${oldState.guild.id}] All users left voice channel, cleaning up`);
+        deleteGuildQueue(oldState.guild.id);
     }
 });
 
@@ -311,7 +330,13 @@ function gracefulShutdown(signal) {
     // Destroy client
     client.destroy();
     logger.info('[SHUTDOWN] Cleanup complete, exiting.');
-    process.exit(0);
+
+    // Wait for logger to flush before exiting
+    logger.on('finish', () => process.exit(0));
+    logger.end();
+
+    // Fallback: force exit after 3s if logger hangs
+    setTimeout(() => process.exit(0), 3000).unref();
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

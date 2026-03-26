@@ -4,7 +4,7 @@
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { EmbedBuilder } = require('discord.js');
-const { DOWNLOAD_DIR } = require('../config/constants');
+const { DOWNLOAD_DIR, MAX_DOWNLOAD_QUEUE } = require('../config/constants');
 const { downloadSingleTo, getVideoInfo } = require('./ytdlp');
 const DownloadProgressManager = require('./ProgressManager');
 const { truncateMessage } = require('../utils/formatting');
@@ -28,6 +28,10 @@ class BackgroundDownloader {
      * @param {object} track - Track object
      */
     addToQueue(guildId, track) {
+        if (this.queue.length >= MAX_DOWNLOAD_QUEUE) {
+            logger.warn(`[BG-DOWNLOAD] Queue full (${MAX_DOWNLOAD_QUEUE}), rejecting track: ${track.url}`);
+            return;
+        }
         this.queue.push({ guildId, track });
         this.processQueue();
     }
