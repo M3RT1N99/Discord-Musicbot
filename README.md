@@ -9,7 +9,7 @@ A self-hosted Discord music bot powered by yt-dlp with slash commands and Docker
 - **Playlist Support** — YouTube playlists with background downloading and progress display
 - **Now Playing UI** — Interactive embed with ⏮️⏯️⏭️🔉🔊 buttons
 - **Audio Cache** — LRU file cache with configurable size, persisted to disk
-- **Local Mapping Playback** — `/playchrist` queues local audio files from `mapping/`
+- **Local Mapping Playback** — `/playchrist` queues local audio files from `/mapping/christ`
 - **Repeat & Shuffle** — Song loop, queue loop, shuffle mode
 - **Rate Limiting** — 10 downloads/user/minute
 - **Graceful Shutdown** — Clean voice disconnects on container stop
@@ -37,7 +37,7 @@ MAX_CACHE=200
 DOWNLOAD_TIMEOUT_SEC=120
 LOG_LEVEL=info
 DOWNLOAD_HOST_PATH=./downloads
-MAPPING_HOST_PATH=./mapping
+MAPPING_HOST_PATH=./mapping/christ
 ```
 
 ### 3. Run (Docker)
@@ -69,7 +69,7 @@ yt-dlp is automatically updated on every container start and checked every 6 hou
 | `/repeatsingle` | Repeat current song |
 | `/repeat` | Repeat entire queue |
 | `/playcache` | Play all cached songs |
-| `/playchrist` | Play all audio files from the `mapping/` folder |
+| `/playchrist` | Play all audio files from `/mapping/christ` |
 | `/leave` | Disconnect bot from voice |
 | `/debug` | Show debug info |
 | `/clearcache` | Clear audio cache (Admin) |
@@ -121,8 +121,8 @@ src/
 | `SEARCH_TIMEOUT_SEC` | `30` | Search timeout in seconds |
 | `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
 | `DOWNLOAD_HOST_PATH` | `./downloads` | Host path for audio cache |
-| `MAPPING_HOST_PATH` | `./mapping` | Host path for local audio files used by `/playchrist` |
-| `MAPPING_DIR` | `./mapping` locally, `/app/mapping` in Docker | Container/local path read by `/playchrist` |
+| `MAPPING_HOST_PATH` | `./mapping/christ` | Host path for local audio files mounted for `/playchrist` |
+| `MAPPING_DIR` | `/mapping/christ` | Container/local path read by `/playchrist` |
 | `LOGS_HOST_PATH` | `./logs` | Host path for log files |
 
 ## License

@@ -13,7 +13,7 @@ services:
       # yt-dlp Configuration (fixed in Docker container)
       - YTDLP_PATH=/opt/venv/bin/yt-dlp
       - DOWNLOAD_DIR=/app/downloads
-      - MAPPING_DIR=/app/mapping
+      - MAPPING_DIR=/mapping/christ
 
       # User-configurable settings from .env
       - MAX_CACHE=${MAX_CACHE:-200}
@@ -28,7 +28,7 @@ services:
       - ${DOWNLOAD_HOST_PATH:-./downloads}:/app/downloads
 
       # Local audio files for /playchrist
-      - ${MAPPING_HOST_PATH:-./mapping}:/app/mapping:ro
+      - ${MAPPING_HOST_PATH:-./mapping/christ}:/mapping/christ:ro
 
       # Logs directory (optional: can also be bind mount)
       - ${LOGS_HOST_PATH:-./logs}:/app/logs

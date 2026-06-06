@@ -749,7 +749,7 @@ async function handlePlaycacheCommand(context) {
 }
 
 /**
- * /playchrist - add all local audio files from mapping directory to queue
+ * /playchrist - add all local audio files from /mapping/christ to queue
  */
 async function handlePlaychristCommand(context) {
     const { interaction, audioCache } = context;
@@ -808,12 +808,12 @@ async function handlePlaychristCommand(context) {
             url: null,
             duration: 'lokale Datei',
             isLocalFile: true,
-            playlistTitle: 'mapping',
+            playlistTitle: 'mapping/christ',
             relativePath
         });
     }
 
-    let replyMsg = `✅ **${filesToAdd.length}** lokale Audiodateien aus \`mapping/\` zur Queue hinzugefügt.`;
+    let replyMsg = `✅ **${filesToAdd.length}** lokale Audiodateien aus \`${MAPPING_DIR}\` zur Queue hinzugefügt.`;
     if (filesToAdd.length < audioFiles.length) {
         replyMsg += `\n⚠️ Queue-Limit erreicht, ${audioFiles.length - filesToAdd.length} Dateien wurden übersprungen.`;
     }

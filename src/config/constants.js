@@ -1,13 +1,11 @@
 // src/config/constants.js
 // Central configuration for Discord Musicbot
 
-const path = require('path');
-
 // --------------------------- Environment Configuration ---------------------------
 const TOKEN = process.env.TOKEN;
 const YTDLP_BIN = process.env.YTDLP_PATH || "/opt/venv/bin/yt-dlp";
 const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || "/tmp/musicbot_downloads";
-const MAPPING_DIR = process.env.MAPPING_DIR || path.join(process.cwd(), "mapping");
+const MAPPING_DIR = process.env.MAPPING_DIR || "/mapping/christ";
 const MAX_CACHE = parseInt(process.env.MAX_CACHE || "200", 10);
 const DOWNLOAD_TIMEOUT_MS = (parseInt(process.env.DOWNLOAD_TIMEOUT_SEC || "120", 10)) * 1000;
 const SEARCH_TIMEOUT_MS = (parseInt(process.env.SEARCH_TIMEOUT_SEC || "30", 10)) * 1000;

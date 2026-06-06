@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Temp-Verzeichnis für Downloads und lokalen Mapping-Ordner erstellen
-RUN mkdir -p /tmp/musicbot_downloads /app/mapping
+RUN mkdir -p /tmp/musicbot_downloads /mapping/christ
 
 # yt-dlp in Virtual Environment installieren (nur im Container)
 RUN python3 -m venv /opt/venv && \
