@@ -3,6 +3,11 @@
 
 const winston = require('winston');
 const path = require('path');
+const fs = require('fs');
+
+const defaultLogDir = process.platform === 'win32' ? path.join(process.cwd(), 'logs') : '/tmp';
+const logDir = process.env.LOG_DIR || defaultLogDir;
+fs.mkdirSync(logDir, { recursive: true });
 
 // Define log format
 const logFormat = winston.format.combine(
@@ -30,14 +35,14 @@ const logger = winston.createLogger({
         // File transport for errors
         // TIP: Use /tmp for LOG_DIR to avoid Windows/Host I/O lags during playback
         new winston.transports.File({
-            filename: path.join(process.env.LOG_DIR || '/tmp', 'error.log'),
+            filename: path.join(logDir, 'error.log'),
             level: 'error',
             maxsize: 5242880, // 5MB
             maxFiles: 5
         }),
         // File transport for all logs
         new winston.transports.File({
-            filename: path.join(process.env.LOG_DIR || '/tmp', 'combined.log'),
+            filename: path.join(logDir, 'combined.log'),
             maxsize: 5242880, // 5MB
             maxFiles: 5
         })

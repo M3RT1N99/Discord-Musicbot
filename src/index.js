@@ -43,6 +43,7 @@ const {
     handleTestCommand,
     handleDebugCommand,
     handlePlaycacheCommand,
+    handlePlaychristCommand,
     handleRefreshCommand,
     handleClearcacheCommand,
     handleRepeatSingleCommand,
@@ -77,6 +78,7 @@ const commandBuilders = [
     new SlashCommandBuilder().setName("test").setDescription("Spielt test.mp3 im Container"),
     new SlashCommandBuilder().setName("debug").setDescription("Debug-Informationen anzeigen"),
     new SlashCommandBuilder().setName("playcache").setDescription("Spielt alle Lieder aus dem Cache ab"),
+    new SlashCommandBuilder().setName("playchrist").setDescription("Spielt alle Audiodateien aus dem mapping-Ordner ab"),
     new SlashCommandBuilder().setName("refresh").setDescription("Commands neu registrieren (Admin only)"),
     new SlashCommandBuilder().setName("clearcache").setDescription("Cache leeren (Admin only)"),
     new SlashCommandBuilder().setName("repeatsingle").setDescription("Wiederholt den aktuellen Song"),
@@ -198,6 +200,7 @@ client.on("interactionCreate", async interaction => {
                 createPlayerForGuild,
                 createGuildQueue,
                 deleteGuildQueue,
+                commandBuilders,
                 logger
             };
             try {
@@ -216,6 +219,7 @@ client.on("interactionCreate", async interaction => {
                 createPlayerForGuild,
                 createGuildQueue,
                 deleteGuildQueue,
+                commandBuilders,
                 logger
             };
             try {
@@ -243,6 +247,7 @@ client.on("interactionCreate", async interaction => {
         createPlayerForGuild,
         createGuildQueue,
         deleteGuildQueue,
+        commandBuilders,
         logger
     };
 
@@ -288,6 +293,9 @@ client.on("interactionCreate", async interaction => {
             case 'playcache':
                 await handlePlaycacheCommand(context);
                 break;
+            case 'playchrist':
+                await handlePlaychristCommand(context);
+                break;
             case 'refresh':
                 await handleRefreshCommand(context);
                 break;
@@ -316,7 +324,12 @@ client.on("interactionCreate", async interaction => {
 });
 
 // --------------------------- Graceful Shutdown ---------------------------
-function gracefulShutdown(signal) {
+let isShuttingDown = false;
+
+async function gracefulShutdown(signal) {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
     logger.info(`[SHUTDOWN] Received ${signal}, cleaning up...`);
 
     // Destroy all voice connections
@@ -325,7 +338,11 @@ function gracefulShutdown(signal) {
     }
 
     // Force save cache
-    try { audioCache.save(); } catch { }
+    try {
+        await audioCache.flush();
+    } catch (err) {
+        logger.warn(`[SHUTDOWN] Cache flush failed: ${err?.message || err}`);
+    }
 
     // Destroy client
     client.destroy();
@@ -339,8 +356,15 @@ function gracefulShutdown(signal) {
     setTimeout(() => process.exit(0), 3000).unref();
 }
 
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+function handleShutdownSignal(signal) {
+    gracefulShutdown(signal).catch(err => {
+        logger.error(`[SHUTDOWN] Failed: ${err?.message || err}`);
+        process.exit(1);
+    });
+}
+
+process.on('SIGTERM', () => handleShutdownSignal('SIGTERM'));
+process.on('SIGINT', () => handleShutdownSignal('SIGINT'));
 
 // --------------------------- Error Handlers ---------------------------
 process.on("uncaughtException", err => {

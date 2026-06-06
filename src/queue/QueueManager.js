@@ -57,6 +57,8 @@ function createPlayerForGuild(guildId, connection) {
     player.on(AudioPlayerStatus.Idle, () => {
         // Delete "Now Playing" message when song finishes
         const queue = guildQueues.get(guildId);
+        if (!queue || queue.isCleaningUp) return;
+
         if (queue && queue.nowPlayingMessage) {
             queue.nowPlayingMessage.delete().catch(() => {
                 // Ignore errors (e.g., message already deleted)
@@ -65,7 +67,10 @@ function createPlayerForGuild(guildId, connection) {
         }
 
         // Loop Logic
-        if (queue && queue.currentTrack) {
+        const shouldLoopCurrentTrack = !queue.skipRequested;
+        queue.skipRequested = false;
+
+        if (shouldLoopCurrentTrack && queue.currentTrack) {
             if (queue.loopMode === 'song') {
                 // Repeat current song (insert at front)
                 queue.songs.unshift(queue.currentTrack);
@@ -77,6 +82,8 @@ function createPlayerForGuild(guildId, connection) {
 
         // Ensure next track is downloaded and played (pass audioCache from queue)
         const queue2 = guildQueues.get(guildId);
+        if (!queue2 || queue2.isCleaningUp) return;
+
         ensureNextTrackDownloadedAndPlay(guildId, queue2?.audioCache).catch(e =>
             logger.error(`[ENSURE NEXT ERROR] ${e?.message || e}`)
         );
@@ -96,10 +103,11 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth = 0)
         return;
     }
     const q = guildQueues.get(guildId);
-    if (!q) return;
+    if (!q || q.isCleaningUp) return;
 
     if (q.songs.length === 0) {
         // Nothing left -> cleanup connection
+        q.isCleaningUp = true;
         try { q.connection.destroy(); } catch { }
         guildQueues.delete(guildId);
         return;
@@ -165,7 +173,8 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth = 0)
                 q.lastInteractionChannel.send({ content: "🛑 Zu viele Fehler hintereinander (5). Stoppe Wiedergabe um Spam zu vermeiden.", flags: [MessageFlags.SuppressNotifications] }).catch(() => { });
             }
             // Cleanup
-            q.player.stop();
+            q.isCleaningUp = true;
+            try { q.player.stop(); } catch { }
             try { q.connection.destroy(); } catch { }
             guildQueues.delete(guildId);
             return;
@@ -189,7 +198,7 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth = 0)
  */
 function playNextInGuild(guildId) {
     const q = guildQueues.get(guildId);
-    if (!q) return;
+    if (!q || q.isCleaningUp) return;
 
     const track = q.songs.shift();
     if (!track) return;
@@ -214,23 +223,29 @@ function playNextInGuild(guildId) {
         '-ar', '48000',
         '-ac', '2',
         'pipe:1'
-    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-    // Aggressive PCM Pre-Buffering: Load entire song into RAM before playback
+    const PREBUFFER_BYTES = 2 * 1024 * 1024;
+    const stream = new PassThrough({ highWaterMark: PREBUFFER_BYTES });
     const chunks = [];
     let bufferedBytes = 0;
     let isPlaying = false;
-    const MAX_PREBUFFER = 150 * 1024 * 1024; // 150MB cap (~13min audio)
+    let ffmpegClosed = false;
+    let stderr = '';
+
+    const writeToStream = (chunk) => {
+        if (stream.destroyed) return;
+        if (!stream.write(chunk)) {
+            ffmpeg.stdout.pause();
+            stream.once('drain', () => {
+                if (ffmpeg.stdout.readable) ffmpeg.stdout.resume();
+            });
+        }
+    };
 
     const startPlayback = () => {
         if (isPlaying || chunks.length === 0) return;
         isPlaying = true;
-
-        const fullBuffer = Buffer.concat(chunks);
-        // Free individual chunks immediately to allow GC (saves ~150MB during playback)
-        chunks.length = 0;
-        const stream = new PassThrough();
-        stream.end(fullBuffer);
 
         const resource = createAudioResource(stream, {
             inputType: StreamType.Raw,
@@ -243,31 +258,70 @@ function playNextInGuild(guildId) {
 
         q.player.play(resource);
         renderNowPlaying(guildId, track); // Show UI only when playing starts
+
+        for (const chunk of chunks.splice(0)) {
+            writeToStream(chunk);
+        }
+        bufferedBytes = 0;
+
+        if (ffmpegClosed && !stream.destroyed) {
+            stream.end();
+        }
     };
 
     q.currentFfmpeg = ffmpeg;
 
     ffmpeg.stdout.on('data', (chunk) => {
-        chunks.push(chunk);
-        bufferedBytes += chunk.length;
-        // If file is huge, start playing after 10MB to avoid OOM
-        if (bufferedBytes > MAX_PREBUFFER) startPlayback();
+        if (!isPlaying) {
+            chunks.push(chunk);
+            bufferedBytes += chunk.length;
+            if (bufferedBytes >= PREBUFFER_BYTES) startPlayback();
+            return;
+        }
+
+        writeToStream(chunk);
+    });
+
+    ffmpeg.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+        if (stderr.length > 4096) stderr = stderr.slice(-4096);
     });
 
     ffmpeg.on('close', (code) => {
         q.currentFfmpeg = null;
-        if (code !== 0 && chunks.length === 0) {
-            logger.error(`[FFMPEG ERROR] Failed to buffer track ${track.title}`);
-            playNextInGuild(guildId); // Skip to next on total failure
+        ffmpegClosed = true;
+
+        if (chunks.length === 0 && !isPlaying) {
+            logger.error(`[FFMPEG ERROR] No audio data for track ${track.title}: ${stderr.split('\n').slice(-3).join('\n')}`);
+            stream.destroy();
+            if (!q.isCleaningUp) playNextInGuild(guildId);
             return;
         }
-        startPlayback();
+
+        if (code !== 0 && !isPlaying) {
+            logger.error(`[FFMPEG ERROR] Failed to buffer track ${track.title}: ${stderr.split('\n').slice(-3).join('\n')}`);
+            stream.destroy();
+            if (!q.isCleaningUp) playNextInGuild(guildId);
+            return;
+        }
+
+        if (!isPlaying) startPlayback();
+        if (!stream.destroyed) stream.end();
+
+        if (code !== 0) {
+            logger.warn(`[FFMPEG WARN] ffmpeg exited ${code} after playback started: ${stderr.split('\n').slice(-3).join('\n')}`);
+        }
     });
 
     ffmpeg.on('error', (err) => {
         q.currentFfmpeg = null;
         logger.error(`[FFMPEG SPAWN ERROR] ${err.message}`);
-        playNextInGuild(guildId);
+        if (!isPlaying) {
+            stream.destroy();
+            if (!q.isCleaningUp) playNextInGuild(guildId);
+        } else {
+            stream.destroy(err);
+        }
     });
 }
 
@@ -276,7 +330,7 @@ function playNextInGuild(guildId) {
  */
 function renderNowPlaying(guildId, track) {
     const q = guildQueues.get(guildId);
-    if (!q) return;
+    if (!q || q.isCleaningUp) return;
 
     // Send fancy Now Playing embed with player controls
     if (q.lastInteractionChannel) {
@@ -284,10 +338,12 @@ function renderNowPlaying(guildId, track) {
             const volPercent = q.volume || 50;
             const volBar = '█'.repeat(Math.round(volPercent / 10)) + '░'.repeat(10 - Math.round(volPercent / 10));
             const queuePos = q.songs.length > 0 ? `${q.songs.length} Song${q.songs.length > 1 ? 's' : ''} in Queue` : 'Queue leer';
+            const title = track.title || path.basename(track.filepath);
+            const description = track.url ? `**[${title}](${track.url})**` : `**${title}**`;
 
             const embed = new EmbedBuilder()
                 .setTitle('🎶 Now Playing')
-                .setDescription(`**[${track.title || path.basename(track.filepath)}](${track.url || ''})**`)
+                .setDescription(description)
                 .addFields(
                     { name: '⏱️ Dauer', value: String(track.duration || 'unbekannt'), inline: true },
                     { name: '👤 Angefragt von', value: `<@${track.requesterId}>`, inline: true },
@@ -355,7 +411,9 @@ function createGuildQueue(guildId, connection, player, channel) {
         shuffle: false,
         loopMode: 'off', // 'off', 'song', 'queue'
         lastInteractionChannel: channel,
-        consecutiveErrors: 0
+        consecutiveErrors: 0,
+        skipRequested: false,
+        isCleaningUp: false
     };
     guildQueues.set(guildId, queue);
     return queue;
@@ -384,6 +442,7 @@ function safeKillFfmpeg(ffmpeg) {
 function cleanupGuildResources(guildId) {
     const queue = guildQueues.get(guildId);
     if (!queue) return;
+    queue.isCleaningUp = true;
 
     // Kill FFmpeg process
     if (queue.currentFfmpeg) {
@@ -399,6 +458,9 @@ function cleanupGuildResources(guildId) {
     queue.currentTrack = null;
     queue.previousTrack = null;
     queue.currentResource = null;
+    if (queue.nowPlayingMessage) {
+        queue.nowPlayingMessage.delete().catch(() => { });
+    }
     queue.nowPlayingMessage = null;
     queue.playlistProgressMsg = null;
 
@@ -413,19 +475,42 @@ function cleanupGuildResources(guildId) {
 function deleteGuildQueue(guildId) {
     const queue = guildQueues.get(guildId);
     if (queue) {
+        queue.isCleaningUp = true;
         if (queue.currentFfmpeg) {
             safeKillFfmpeg(queue.currentFfmpeg);
             queue.currentFfmpeg = null;
         }
-        queue.player.stop();
+        try { queue.player.stop(); } catch { }
         try { queue.connection.destroy(); } catch { }
         queue.songs.length = 0;
         queue.currentTrack = null;
         queue.previousTrack = null;
         queue.currentResource = null;
+        if (queue.nowPlayingMessage) {
+            queue.nowPlayingMessage.delete().catch(() => { });
+        }
         queue.nowPlayingMessage = null;
         guildQueues.delete(guildId);
     }
+}
+
+/**
+ * Requests a skip for the current track without re-adding it in repeat modes.
+ * @param {string} guildId - Guild ID
+ * @returns {boolean} True if a queue existed
+ */
+function skipCurrentTrack(guildId) {
+    const queue = guildQueues.get(guildId);
+    if (!queue || queue.isCleaningUp) return false;
+
+    queue.skipRequested = true;
+    if (queue.currentFfmpeg) {
+        safeKillFfmpeg(queue.currentFfmpeg);
+        queue.currentFfmpeg = null;
+    }
+
+    try { queue.player.stop(); } catch { }
+    return true;
 }
 
 module.exports = {
@@ -436,5 +521,6 @@ module.exports = {
     getGuildQueue,
     createGuildQueue,
     deleteGuildQueue,
-    cleanupGuildResources
+    cleanupGuildResources,
+    skipCurrentTrack
 };

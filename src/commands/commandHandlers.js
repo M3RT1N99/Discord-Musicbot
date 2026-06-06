@@ -6,14 +6,14 @@ const path = require('path');
 const { randomUUID } = require('crypto');
 const { EmbedBuilder, REST, Routes, PermissionsBitField, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
-const { TOKEN, DOWNLOAD_DIR, MAX_QUERY_LENGTH, SEARCH_CACHE_TIMEOUT, MAX_PENDING_CHOICES, MAX_SONGS_PER_QUEUE } = require('../config/constants');
+const { TOKEN, DOWNLOAD_DIR, MAPPING_DIR, LOCAL_AUDIO_EXTENSIONS, MAX_QUERY_LENGTH, SEARCH_CACHE_TIMEOUT, MAX_PENDING_CHOICES, MAX_SONGS_PER_QUEUE } = require('../config/constants');
 const { joinVoiceChannelWithRetry } = require('../voice/VoiceManager');
 const { downloadSingleTo, getVideoInfo, searchYouTubeVideos, getPlaylistEntries } = require('../download/ytdlp');
 const { isValidMediaUrl, validateSearchQuery, sanitizeString, isInteractionValid, safeFollowUp } = require('../utils/validation');
 const { isUrl, isYouTubePlaylistUrl, cleanYouTubeUrl, isRealPlaylist, cleanPlaylistUrl, hasVideoAndPlaylist } = require('../utils/urlCleaner');
 const { formatDuration, truncateMessage, shuffleArray } = require('../utils/formatting');
 const DownloadProgressManager = require('../download/ProgressManager');
-const { ensureNextTrackDownloadedAndPlay } = require('../queue/QueueManager');
+const { ensureNextTrackDownloadedAndPlay, skipCurrentTrack } = require('../queue/QueueManager');
 const logger = require('../utils/logger');
 
 // Pending playlist/song choices (short key -> { url, userId, createdAt })
@@ -51,6 +51,32 @@ async function ensureQueueAndJoin(context) {
         if (audioCache && !queue.audioCache) queue.audioCache = audioCache;
     }
     return queue;
+}
+
+async function collectLocalAudioFiles(baseDir) {
+    const files = [];
+
+    async function walk(dir) {
+        const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+
+        for (const entry of entries) {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                await walk(fullPath);
+                continue;
+            }
+
+            if (!entry.isFile()) continue;
+
+            const ext = path.extname(entry.name).toLowerCase();
+            if (LOCAL_AUDIO_EXTENSIONS.includes(ext)) {
+                files.push(fullPath);
+            }
+        }
+    }
+
+    await walk(baseDir);
+    return files.sort((a, b) => path.relative(baseDir, a).localeCompare(path.relative(baseDir, b), undefined, { numeric: true, sensitivity: 'base' }));
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +282,12 @@ async function handlePlayCommand(context) {
                 await promptMsg?.edit({ content: '⏱️ Keine Auswahl getroffen — spiele nur das Lied.', components: [disabledRow] }).catch(() => { });
 
                 const singleUrl = cleanYouTubeUrl(sanitizedQuery);
-                try { await ensureQueueAndJoin(context); } catch { }
+                try {
+                    await ensureQueueAndJoin(context);
+                } catch (e) {
+                    await safeFollowUp(interaction, `❌ ${e.message}`);
+                    return;
+                }
                 await handleSingleUrlPlay(context, singleUrl || sanitizedQuery);
             } catch { }
         }, 15000);
@@ -492,7 +523,7 @@ async function handleSkipCommand(context) {
         queue.nowPlayingMessage = null;
     }
 
-    queue.player.stop(); // Triggers Idle -> next track
+    skipCurrentTrack(interaction.guildId); // Triggers Idle -> next track
     await interaction.reply({ content: '⏭️ Übersprungen', ephemeral: true });
 }
 
@@ -718,10 +749,87 @@ async function handlePlaycacheCommand(context) {
 }
 
 /**
+ * /playchrist - add all local audio files from mapping directory to queue
+ */
+async function handlePlaychristCommand(context) {
+    const { interaction, audioCache } = context;
+    const memberVoice = interaction.member?.voice?.channel;
+
+    if (!memberVoice) {
+        return interaction.reply({ content: 'Du musst in einem Sprachkanal sein!', ephemeral: true });
+    }
+
+    await interaction.deferReply();
+
+    let stat;
+    try {
+        stat = await fs.promises.stat(MAPPING_DIR);
+    } catch {
+        return interaction.editReply(`❌ Mapping-Ordner nicht gefunden: \`${MAPPING_DIR}\``);
+    }
+
+    if (!stat.isDirectory()) {
+        return interaction.editReply(`❌ Mapping-Pfad ist kein Ordner: \`${MAPPING_DIR}\``);
+    }
+
+    let audioFiles;
+    try {
+        audioFiles = await collectLocalAudioFiles(MAPPING_DIR);
+    } catch (err) {
+        logger.error(`[PLAYCHRIST] Could not read mapping directory: ${err.message}`);
+        return interaction.editReply('❌ Mapping-Ordner konnte nicht gelesen werden.');
+    }
+
+    if (audioFiles.length === 0) {
+        return interaction.editReply(`📁 Keine Audiodateien im Mapping-Ordner gefunden. Unterstützt: ${LOCAL_AUDIO_EXTENSIONS.join(', ')}`);
+    }
+
+    let queue;
+    try {
+        queue = await ensureQueueAndJoin(context);
+    } catch (e) {
+        return interaction.editReply(`❌ Fehler beim Beitreten: ${e.message}`);
+    }
+
+    const freeSlots = Math.max(0, MAX_SONGS_PER_QUEUE - queue.songs.length);
+    if (freeSlots === 0) {
+        return interaction.editReply(`⚠️ Queue-Limit erreicht (max. ${MAX_SONGS_PER_QUEUE}).`);
+    }
+
+    const filesToAdd = audioFiles.slice(0, freeSlots);
+    for (const filepath of filesToAdd) {
+        const relativePath = path.relative(MAPPING_DIR, filepath);
+        const title = sanitizeString(path.basename(filepath, path.extname(filepath))) || path.basename(filepath);
+
+        queue.songs.push({
+            requesterId: interaction.user.id,
+            title,
+            filepath,
+            url: null,
+            duration: 'lokale Datei',
+            isLocalFile: true,
+            playlistTitle: 'mapping',
+            relativePath
+        });
+    }
+
+    let replyMsg = `✅ **${filesToAdd.length}** lokale Audiodateien aus \`mapping/\` zur Queue hinzugefügt.`;
+    if (filesToAdd.length < audioFiles.length) {
+        replyMsg += `\n⚠️ Queue-Limit erreicht, ${audioFiles.length - filesToAdd.length} Dateien wurden übersprungen.`;
+    }
+
+    await interaction.editReply(replyMsg);
+
+    if (queue.player.state.status !== AudioPlayerStatus.Playing) {
+        await ensureNextTrackDownloadedAndPlay(interaction.guildId, audioCache);
+    }
+}
+
+/**
  * /refresh – re-register slash commands (Admin only)
  */
 async function handleRefreshCommand(context) {
-    const { interaction } = context;
+    const { interaction, commandBuilders } = context;
 
     if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return interaction.reply({ content: '❌ Administrator-Berechtigung erforderlich.', ephemeral: true });
@@ -730,18 +838,22 @@ async function handleRefreshCommand(context) {
     await interaction.deferReply();
 
     try {
+        if (!TOKEN) {
+            throw new Error('TOKEN environment variable not set');
+        }
+        if (!Array.isArray(commandBuilders) || commandBuilders.length === 0) {
+            throw new Error('No command definitions available');
+        }
+
         const rest = new REST({ version: '10' }).setToken(TOKEN);
+        const commandsJson = commandBuilders.map(builder => builder.toJSON());
 
-        // Re-import command builders from index.js would create circular dependency
-        // Instead, clear global and re-register guild commands
+        // Clear global commands to keep guild-scoped commands as the single source.
         await rest.put(Routes.applicationCommands(interaction.client.application.id), { body: [] });
+        await rest.put(Routes.applicationGuildCommands(interaction.client.application.id, interaction.guildId), { body: commandsJson });
 
-        // Get current commands from the client
-        const commands = await rest.get(Routes.applicationGuildCommands(interaction.client.application.id, interaction.guildId));
-
-        // If commands exist, just report success  
         logger.info(`[REFRESH] Commands refreshed for guild ${interaction.guildId}`);
-        await interaction.editReply(`✅ Commands erfolgreich aktualisiert! (${commands.length} Commands registriert)`);
+        await interaction.editReply(`✅ Commands erfolgreich aktualisiert! (${commandsJson.length} Commands registriert)`);
     } catch (err) {
         logger.error(`[REFRESH ERROR] ${err.message}`);
         await interaction.editReply('❌ Fehler beim Registrieren der Commands.');
@@ -850,7 +962,11 @@ async function handlePlaylistChoiceButton(context) {
         });
 
         const singleUrl = cleanYouTubeUrl(url);
-        try { await ensureQueueAndJoin(context); } catch { }
+        try {
+            await ensureQueueAndJoin(context);
+        } catch (e) {
+            return await safeFollowUp(interaction, `❌ ${e.message}`);
+        }
         await handleSingleUrlPlay(context, singleUrl || url);
 
     } else if (action === 'play_playlist') {
@@ -955,7 +1071,7 @@ async function handleNowPlayingButton(context) {
             break;
         }
         case 'np_skip': {
-            queue.player.stop(); // Triggers Idle → next track
+            skipCurrentTrack(guildId); // Triggers Idle → next track
             // Don't update embed, a new one will be sent for the next track
             return interaction.deferUpdate();
         }
@@ -967,7 +1083,7 @@ async function handleNowPlayingButton(context) {
                 }
                 queue.songs.unshift(queue.previousTrack);
                 queue.previousTrack = null;
-                queue.player.stop(); // Triggers Idle → plays the unshifted prev track
+                skipCurrentTrack(guildId); // Triggers Idle → plays the unshifted prev track
                 return interaction.deferUpdate();
             } else {
                 return interaction.reply({ content: '⏮️ Kein vorheriger Song vorhanden.', ephemeral: true });
@@ -1040,10 +1156,12 @@ async function handleNowPlayingButton(context) {
         const volBar = '█'.repeat(Math.round(volPercent / 10)) + '░'.repeat(10 - Math.round(volPercent / 10));
         const queuePos = queue.songs.length > 0 ? `${queue.songs.length} Song${queue.songs.length > 1 ? 's' : ''} in Queue` : 'Queue leer';
         const isPaused = queue.player.state.status === AudioPlayerStatus.Paused;
+        const title = track.title || 'Unknown';
+        const description = track.url ? `**[${title}](${track.url})**` : `**${title}**`;
 
         const embed = new EmbedBuilder()
             .setTitle(isPaused ? '⏸️ Paused' : '🎶 Now Playing')
-            .setDescription(`**[${track.title || 'Unknown'}](${track.url || ''})**`)
+            .setDescription(description)
             .addFields(
                 { name: '⏱️ Dauer', value: String(track.duration || 'unbekannt'), inline: true },
                 { name: '👤 Angefragt von', value: `<@${track.requesterId}>`, inline: true },
@@ -1090,6 +1208,7 @@ module.exports = {
     handleTestCommand,
     handleDebugCommand,
     handlePlaycacheCommand,
+    handlePlaychristCommand,
     handleRefreshCommand,
     handleClearcacheCommand,
     handleRepeatSingleCommand,

@@ -33,12 +33,13 @@ class SearchCache {
         });
 
         // Schedule automatic cleanup for this entry
-        setTimeout(() => {
+        const expiryTimer = setTimeout(() => {
             const cached = this.cache.get(userId);
             if (cached && cached.timestamp === data.timestamp) {
                 this.cache.delete(userId);
             }
         }, this.timeout + 1000);
+        expiryTimer.unref();
     }
 
     /**

@@ -10,6 +10,40 @@ const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
 
+function buildLowPriorityCommand(binary, args) {
+    if (process.platform === 'win32') {
+        return { command: binary, args };
+    }
+    return { command: 'nice', args: ['-n', '19', binary, ...args] };
+}
+
+function createProcessError(message, stdout = '', stderr = '', code = null) {
+    const error = new Error(message);
+    error.stdout = stdout;
+    error.stderr = stderr;
+    error.code = code;
+    return error;
+}
+
+function isPathInside(parentDir, candidatePath) {
+    const parent = path.resolve(parentDir);
+    const candidate = path.resolve(candidatePath);
+    const relative = path.relative(parent, candidate);
+    return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function normalizeSearchResultUrl(entry, platform) {
+    const rawUrl = entry.webpage_url || entry.original_url || entry.url;
+    if (rawUrl && isValidMediaUrl(rawUrl)) return rawUrl;
+
+    const id = entry.id || entry.url;
+    if (platform.toLowerCase() === 'youtube' && typeof id === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(id)) {
+        return `https://www.youtube.com/watch?v=${id}`;
+    }
+
+    return null;
+}
+
 /**
  * Spawns yt-dlp process with security measures
  * @param {Array<string>} args - Command arguments
@@ -29,8 +63,9 @@ function spawnYtdlp(args, opts = {}, timeoutMs = DOWNLOAD_TIMEOUT_MS, errorMsg =
             return true;
         });
 
-        // Spawn yt-dlp with lowest CPU priority to avoid audio stutter
-        const proc = spawn('nice', ['-n', '19', YTDLP_BIN, ...safeArgs], {
+        // Spawn yt-dlp with low CPU priority where the platform supports it.
+        const command = buildLowPriorityCommand(YTDLP_BIN, safeArgs);
+        const proc = spawn(command.command, command.args, {
             ...opts,
             stdio: ["ignore", "pipe", "pipe"],
             shell: false // Prevent shell injection
@@ -49,18 +84,18 @@ function spawnYtdlp(args, opts = {}, timeoutMs = DOWNLOAD_TIMEOUT_MS, errorMsg =
 
         const timer = setTimeout(() => {
             proc.kill("SIGKILL");
-            reject(new Error(errorMsg));
+            reject(createProcessError(errorMsg, stdout, stderr));
         }, timeoutMs);
 
         proc.on("error", err => {
             clearTimeout(timer);
-            reject(err);
+            reject(createProcessError(err.message, stdout, stderr, err.code));
         });
 
         proc.on("close", code => {
             clearTimeout(timer);
             if (code === 0) resolve({ stdout, stderr, code });
-            else reject(new Error(`yt-dlp exited ${code}: ${stderr.split("\n").slice(-6).join("\n")}`));
+            else reject(createProcessError(`yt-dlp exited ${code}: ${stderr.split("\n").slice(-6).join("\n")}`, stdout, stderr, code));
         });
     });
 }
@@ -256,11 +291,15 @@ async function searchVideos(query, maxResults = 10, platform = 'youtube') {
     }
 
     return info.entries
-        .filter(entry => entry.url && entry.title)
+        .map(entry => ({
+            ...entry,
+            normalizedUrl: normalizeSearchResultUrl(entry, platform)
+        }))
+        .filter(entry => entry.normalizedUrl && entry.title)
         .slice(0, maxResults)
         .map((entry, index) => ({
             index: index + 1,
-            url: entry.url,
+            url: entry.normalizedUrl,
             title: sanitizeString(entry.title || "Unbekannt"),
             uploader: sanitizeString(entry.uploader || entry.channel || "Unbekannt"),
             duration: entry.duration ? formatDuration(entry.duration) : "unbekannt"
@@ -296,15 +335,15 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
             return reject(new Error('Invalid filepath'));
         }
 
-        const normalizedPath = path.normalize(filepath);
-        const normalizedDownloadDir = path.normalize(DOWNLOAD_DIR);
-        if (!normalizedPath.startsWith(normalizedDownloadDir)) {
+        const normalizedPath = path.resolve(filepath);
+        const normalizedDownloadDir = path.resolve(DOWNLOAD_DIR);
+        if (!isPathInside(normalizedDownloadDir, normalizedPath)) {
             return reject(new Error('Filepath outside allowed directory'));
         }
 
         // Ensure directory exists
-        if (!fs.existsSync(DOWNLOAD_DIR)) {
-            fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+        if (!fs.existsSync(normalizedDownloadDir)) {
+            fs.mkdirSync(normalizedDownloadDir, { recursive: true });
         }
 
         const args = [
@@ -319,12 +358,13 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
             "--ignore-errors",
             "--newline", // Important for line-by-line output
             "--limit-rate", "3M", // Throttle to prevent network saturation
-            "-o", filepath,
+            "-o", normalizedPath,
             urlOrId
         ];
 
         // Low-priority spawn (nice 19) to not stutter audio playback
-        const proc = spawn('nice', ['-n', '19', YTDLP_BIN, ...args], { shell: false });
+        const command = buildLowPriorityCommand(YTDLP_BIN, args);
+        const proc = spawn(command.command, command.args, { shell: false });
         let stderr = "";
         const MAX_STDERR_LEN = 8192;
 
@@ -369,8 +409,8 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
 
         proc.on("close", code => {
             clearTimeout(timer);
-            if (code === 0 && fs.existsSync(filepath)) {
-                resolve({ filepath, stderr });
+            if (code === 0 && fs.existsSync(normalizedPath)) {
+                resolve({ filepath: normalizedPath, stderr });
             } else {
                 reject(new Error(`yt-dlp failed (${code}): ${stderr.split("\n").slice(-6).join("\n")}`));
             }

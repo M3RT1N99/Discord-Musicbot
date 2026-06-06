@@ -21,7 +21,13 @@ function isYouTubePlaylistUrl(u) {
     try {
         if (!validateUrl(u)) return false;
         const url = new URL(u);
-        return url.searchParams.has("list");
+        const host = url.hostname.toLowerCase();
+        const isYouTubeHost = host === 'youtu.be' ||
+            host === 'youtube.com' ||
+            host.endsWith('.youtube.com') ||
+            host === 'youtube-nocookie.com' ||
+            host.endsWith('.youtube-nocookie.com');
+        return isYouTubeHost && url.searchParams.has("list");
     } catch {
         return false;
     }
@@ -113,6 +119,7 @@ function cleanPlaylistUrl(url) {
  */
 function isRealPlaylist(url) {
     try {
+        if (!isYouTubePlaylistUrl(url)) return false;
         const urlObj = new URL(url);
         const listParam = urlObj.searchParams.get('list');
 

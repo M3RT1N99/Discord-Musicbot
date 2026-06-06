@@ -52,20 +52,38 @@ class AudioCache {
     }
 
     /**
-     * Saves cache index to disk (debounced)
+     * Writes cache index to disk immediately.
+     */
+    async writeIndex() {
+        const tempFile = `${this.indexFile}.tmp`;
+        await fs.promises.writeFile(tempFile, JSON.stringify([...this.cache], null, 2), "utf-8");
+        await fs.promises.rename(tempFile, this.indexFile);
+    }
+
+    /**
+     * Saves cache index to disk (debounced).
      */
     save() {
         if (this.saveTimer) clearTimeout(this.saveTimer);
         this.saveTimer = setTimeout(async () => {
             try {
-                // Atomic write: temp file then rename
-                const tempFile = `${this.indexFile}.tmp`;
-                await fs.promises.writeFile(tempFile, JSON.stringify([...this.cache], null, 2), "utf-8");
-                await fs.promises.rename(tempFile, this.indexFile);
+                this.saveTimer = null;
+                await this.writeIndex();
             } catch (e) {
                 logger.error(`[CACHE] Async save failed: ${e.message}`);
             }
         }, 60000).unref(); // Debounce 60 seconds to reduce disk I/O
+    }
+
+    /**
+     * Flushes pending cache changes immediately.
+     */
+    async flush() {
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = null;
+        }
+        await this.writeIndex();
     }
 
     /**
@@ -177,6 +195,11 @@ class AudioCache {
      * Clears entire cache: deletes all files, the index, and resets the map
      */
     clear() {
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = null;
+        }
+
         const entries = [...this.cache.values()];
         let deletedFiles = 0;
 

@@ -7,6 +7,7 @@ const path = require('path');
 const TOKEN = process.env.TOKEN;
 const YTDLP_BIN = process.env.YTDLP_PATH || "/opt/venv/bin/yt-dlp";
 const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || "/tmp/musicbot_downloads";
+const MAPPING_DIR = process.env.MAPPING_DIR || path.join(process.cwd(), "mapping");
 const MAX_CACHE = parseInt(process.env.MAX_CACHE || "200", 10);
 const DOWNLOAD_TIMEOUT_MS = (parseInt(process.env.DOWNLOAD_TIMEOUT_SEC || "120", 10)) * 1000;
 const SEARCH_TIMEOUT_MS = (parseInt(process.env.SEARCH_TIMEOUT_SEC || "30", 10)) * 1000;
@@ -48,11 +49,15 @@ const MAX_DOWNLOAD_QUEUE = 200;
 // --------------------------- Cache Configuration ---------------------------
 const SEARCH_CACHE_TIMEOUT = 1 * 60 * 1000; // 1 Minute
 
+// --------------------------- Local Audio Configuration ---------------------------
+const LOCAL_AUDIO_EXTENSIONS = [".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".webm", ".aac"];
+
 module.exports = {
     // Environment
     TOKEN,
     YTDLP_BIN,
     DOWNLOAD_DIR,
+    MAPPING_DIR,
     MAX_CACHE,
     DOWNLOAD_TIMEOUT_MS,
     SEARCH_TIMEOUT_MS,
@@ -77,5 +82,8 @@ module.exports = {
     MAX_DOWNLOAD_QUEUE,
 
     // Cache
-    SEARCH_CACHE_TIMEOUT
+    SEARCH_CACHE_TIMEOUT,
+
+    // Local Audio
+    LOCAL_AUDIO_EXTENSIONS
 };
