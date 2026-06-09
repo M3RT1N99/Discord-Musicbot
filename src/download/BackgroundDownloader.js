@@ -106,6 +106,14 @@ class BackgroundDownloader {
             await new Promise(r => setTimeout(r, 1000));
         }
 
+        // Clean up playlist progress messages when all downloads are done
+        for (const [, guildQueue] of guildQueues) {
+            if (guildQueue.playlistProgressMsg) {
+                guildQueue.playlistProgressMsg.delete().catch(() => {});
+                guildQueue.playlistProgressMsg = null;
+            }
+        }
+
         this.active = false;
     }
 

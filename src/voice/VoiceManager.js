@@ -2,6 +2,7 @@
 // Voice connection management
 
 const { joinVoiceChannel } = require('@discordjs/voice');
+const { PermissionsBitField } = require('discord.js');
 const { JOIN_RETRIES } = require('../config/constants');
 const logger = require('../utils/logger');
 
@@ -12,6 +13,15 @@ const logger = require('../utils/logger');
  * @returns {Promise<VoiceConnection>} Voice connection
  */
 async function joinVoiceChannelWithRetry(voiceChannel, retries = JOIN_RETRIES) {
+    // Check bot permissions before attempting to join
+    const permissions = voiceChannel.permissionsFor(voiceChannel.guild.members.me);
+    if (permissions && !permissions.has(PermissionsBitField.Flags.Connect)) {
+        throw new Error('Keine Berechtigung dem Sprachkanal beizutreten.');
+    }
+    if (permissions && !permissions.has(PermissionsBitField.Flags.Speak)) {
+        throw new Error('Keine Berechtigung im Sprachkanal zu sprechen.');
+    }
+
     let lastErr;
 
     for (let attempt = 0; attempt <= retries; attempt++) {

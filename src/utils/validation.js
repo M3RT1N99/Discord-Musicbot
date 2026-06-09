@@ -110,11 +110,11 @@ function validateSearchQuery(query) {
     if (!query || typeof query !== 'string') return false;
     if (query.length > MAX_QUERY_LENGTH) return false;
 
-    // Prevent command injection attempts
+    // Prevent command injection attempts (shell: false makes () safe, keep strict on actual metacharacters)
     const dangerousPatterns = [
-        /[;&|`$(){}[\]]/,  // Shell metacharacters
+        /[;&|`${}[\]]/,    // Shell metacharacters (parentheses removed — safe with shell:false, common in song titles)
         /\.\./,            // Directory traversal
-        /^-/,              // Command flags
+        /^-/,              // Command flags at start
         /\x00/,            // Null bytes
         /[\r\n]/           // Line breaks
     ];
