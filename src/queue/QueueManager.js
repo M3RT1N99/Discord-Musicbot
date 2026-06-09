@@ -119,6 +119,9 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth = 0)
     // Race condition check: already downloading?
     if (q.isDownloading) return;
 
+    // Shuffle-aware selection: ensure songs[0] is the track we'll actually play
+    prepareNextTrack(q);
+
     // Get next track (peek)
     const next = q.songs[0];
     if (!next) return;
@@ -193,6 +196,24 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth = 0)
 }
 
 /**
+ * Persistent shuffle: when active, moves a random upcoming song to the front so
+ * it becomes the next track. Idempotent per advance (guarded by q._nextPrepared)
+ * so the pre-download peek in ensureNextTrackDownloadedAndPlay and the actual
+ * playback in playNextInGuild always pick the same track. Skipped for loop-song
+ * mode, which intentionally repeats the current track at the front of the queue.
+ * @param {object} q - Guild queue
+ */
+function prepareNextTrack(q) {
+    if (!q.shuffle || q._nextPrepared || q.loopMode === 'song' || q.songs.length <= 1) return;
+    const i = Math.floor(Math.random() * q.songs.length);
+    if (i !== 0) {
+        const [picked] = q.songs.splice(i, 1);
+        q.songs.unshift(picked);
+    }
+    q._nextPrepared = true;
+}
+
+/**
  * Plays next track in guild queue
  * @param {string} guildId - Guild ID
  */
@@ -200,7 +221,9 @@ function playNextInGuild(guildId) {
     const q = guildQueues.get(guildId);
     if (!q || q.isCleaningUp) return;
 
+    prepareNextTrack(q);
     const track = q.songs.shift();
+    q._nextPrepared = false; // next advance re-picks under current shuffle state
     if (!track) return;
 
     // Save previous track for "back" button, set current
@@ -213,12 +236,14 @@ function playNextInGuild(guildId) {
         q.currentFfmpeg = null;
     }
 
-    // Use ffmpeg to convert to Raw PCM (s16le) - the most stable timing format
+    // Use ffmpeg to convert to Raw PCM (s16le) - the most stable timing format.
+    // Small 2MB PassThrough jitter buffer (not the old 150MB Buffer.concat) smooths
+    // playback start without the GC pauses that caused stuttering.
     const vol = (q.volume || 50) / 100;
     const ffmpeg = spawn('ffmpeg', [
         '-loglevel', 'error',
         '-i', track.filepath,
-        '-af', 'aresample=async=1', // Sync clock: prevents warping/leiern
+        '-af', 'aresample=async=1',
         '-f', 's16le',
         '-ar', '48000',
         '-ac', '2',
@@ -365,6 +390,7 @@ function renderNowPlaying(guildId, track) {
                 new ButtonBuilder().setCustomId(`np_volup|${guildId}`).setEmoji('🔊').setStyle(ButtonStyle.Secondary)
             );
             const row2 = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId(`np_shuffle|${guildId}`).setLabel('Shuffle').setEmoji('🔀').setStyle(q.shuffle ? ButtonStyle.Success : ButtonStyle.Secondary),
                 new ButtonBuilder().setCustomId(`np_savequeue|${guildId}`).setLabel('Queue speichern').setEmoji('💾').setStyle(ButtonStyle.Success)
             );
 
@@ -409,6 +435,7 @@ function createGuildQueue(guildId, connection, player, channel) {
         songs: [],
         volume: 50,
         shuffle: false,
+        _nextPrepared: false, // internal: shuffle pick locked in for the next advance
         loopMode: 'off', // 'off', 'song', 'queue'
         lastInteractionChannel: channel,
         consecutiveErrors: 0,

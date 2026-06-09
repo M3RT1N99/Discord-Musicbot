@@ -11,7 +11,7 @@ const { joinVoiceChannelWithRetry } = require('../voice/VoiceManager');
 const { downloadSingleTo, getVideoInfo, searchYouTubeVideos, getPlaylistEntries } = require('../download/ytdlp');
 const { isValidMediaUrl, validateSearchQuery, sanitizeString, isInteractionValid, safeFollowUp } = require('../utils/validation');
 const { isUrl, isYouTubePlaylistUrl, cleanYouTubeUrl, isRealPlaylist, cleanPlaylistUrl, hasVideoAndPlaylist } = require('../utils/urlCleaner');
-const { formatDuration, truncateMessage, shuffleArray } = require('../utils/formatting');
+const { formatDuration, truncateMessage } = require('../utils/formatting');
 const DownloadProgressManager = require('../download/ProgressManager');
 const { ensureNextTrackDownloadedAndPlay, skipCurrentTrack } = require('../queue/QueueManager');
 const logger = require('../utils/logger');
@@ -345,7 +345,7 @@ async function handlePlayCommand(context) {
         // Add rest in background (respect queue size limit)
         let addedCount = 0;
         for (const e of restEntries) {
-            if (queue.songs.length >= MAX_SONGS_PER_QUEUE) {
+            if (remoteSongCount(queue) >= MAX_SONGS_PER_QUEUE) {
                 logger.warn(`[QUEUE LIMIT][${interaction.guildId}] Queue full at ${MAX_SONGS_PER_QUEUE}, skipping remaining playlist entries`);
                 break;
             }
@@ -618,7 +618,9 @@ async function handleLeaveCommand(context) {
 }
 
 /**
- * /shuffle – toggle shuffle mode (does NOT reorder current queue destructively)
+ * /shuffle – toggle persistent shuffle mode. While active, each next track is
+ * picked at random from the queue (no repeats) and newly added songs get mixed
+ * in automatically. The actual random selection happens in QueueManager.
  */
 async function handleShuffleCommand(context) {
     const { interaction, guildQueues } = context;
@@ -627,13 +629,7 @@ async function handleShuffleCommand(context) {
     if (!queue) return interaction.reply({ content: '❌ Keine Queue vorhanden.', ephemeral: true });
 
     queue.shuffle = !queue.shuffle;
-
-    if (queue.shuffle && queue.songs.length > 1) {
-        // Shuffle only songs AFTER the first one (preserve currently queued next)
-        const rest = queue.songs.slice(1);
-        shuffleArray(rest);
-        queue.songs = [queue.songs[0], ...rest];
-    }
+    queue._nextPrepared = false; // re-pick the next track under the new mode
 
     await interaction.reply({ content: `🔀 Shuffle ${queue.shuffle ? 'aktiviert' : 'deaktiviert'}`, ephemeral: true });
 }
@@ -721,7 +717,7 @@ async function handlePlaycacheCommand(context) {
 
     let addedCount = 0;
     for (const [key, val] of allEntries) {
-        if (queue.songs.length >= MAX_SONGS_PER_QUEUE) break;
+        if (remoteSongCount(queue) >= MAX_SONGS_PER_QUEUE) break;
         if (fs.existsSync(val.filepath)) {
             queue.songs.push({
                 requesterId: interaction.user.id,
@@ -740,12 +736,23 @@ async function handlePlaycacheCommand(context) {
     }
 
     let replyMsg = `✅ **${addedCount}** Songs aus dem Cache zur Queue hinzugefügt.`;
-    if (queue.songs.length >= MAX_SONGS_PER_QUEUE) replyMsg += `\n⚠️ Queue-Limit erreicht (max. ${MAX_SONGS_PER_QUEUE}).`;
+    if (remoteSongCount(queue) >= MAX_SONGS_PER_QUEUE) replyMsg += `\n⚠️ Queue-Limit erreicht (max. ${MAX_SONGS_PER_QUEUE}).`;
     await interaction.editReply(replyMsg);
 
     if (queue.player.state.status !== AudioPlayerStatus.Playing) {
         await ensureNextTrackDownloadedAndPlay(interaction.guildId, audioCache);
     }
+}
+
+/**
+ * Counts queued songs that count toward MAX_SONGS_PER_QUEUE. Local mapping-folder
+ * files (isLocalFile) are exempt — they need no download and use negligible memory,
+ * so they neither hit the limit nor consume slots for remote/cached tracks.
+ * @param {object} queue - Guild queue
+ * @returns {number} Number of non-local (downloadable) songs in the queue
+ */
+function remoteSongCount(queue) {
+    return queue.songs.reduce((n, s) => n + (s.isLocalFile ? 0 : 1), 0);
 }
 
 /**
@@ -791,13 +798,8 @@ async function handlePlaychristCommand(context) {
         return interaction.editReply(`❌ Fehler beim Beitreten: ${e.message}`);
     }
 
-    const freeSlots = Math.max(0, MAX_SONGS_PER_QUEUE - queue.songs.length);
-    if (freeSlots === 0) {
-        return interaction.editReply(`⚠️ Queue-Limit erreicht (max. ${MAX_SONGS_PER_QUEUE}).`);
-    }
-
-    const filesToAdd = audioFiles.slice(0, freeSlots);
-    for (const filepath of filesToAdd) {
+    // Local mapping-folder files bypass MAX_SONGS_PER_QUEUE: no download, negligible memory per entry
+    for (const filepath of audioFiles) {
         const relativePath = path.relative(MAPPING_DIR, filepath);
         const title = sanitizeString(path.basename(filepath, path.extname(filepath))) || path.basename(filepath);
 
@@ -813,10 +815,7 @@ async function handlePlaychristCommand(context) {
         });
     }
 
-    let replyMsg = `✅ **${filesToAdd.length}** lokale Audiodateien aus \`${MAPPING_DIR}\` zur Queue hinzugefügt.`;
-    if (filesToAdd.length < audioFiles.length) {
-        replyMsg += `\n⚠️ Queue-Limit erreicht, ${audioFiles.length - filesToAdd.length} Dateien wurden übersprungen.`;
-    }
+    const replyMsg = `✅ **${audioFiles.length}** lokale Audiodateien aus \`${MAPPING_DIR}\` zur Queue hinzugefügt.`;
 
     await interaction.editReply(replyMsg);
 
@@ -1014,7 +1013,7 @@ async function handlePlaylistChoiceButton(context) {
             const { backgroundDownloader } = context;
             let addedCount = 0;
             for (const entry of restEntries) {
-                if (queue.songs.length >= MAX_SONGS_PER_QUEUE) {
+                if (remoteSongCount(queue) >= MAX_SONGS_PER_QUEUE) {
                     logger.warn(`[QUEUE LIMIT][${interaction.guildId}] Queue full at ${MAX_SONGS_PER_QUEUE}`);
                     break;
                 }
@@ -1105,6 +1104,11 @@ async function handleNowPlayingButton(context) {
             } catch { }
             break;
         }
+        case 'np_shuffle': {
+            queue.shuffle = !queue.shuffle;
+            queue._nextPrepared = false; // re-pick the next track under the new mode
+            break;
+        }
         case 'np_savequeue': {
             // Collect all tracks: current + queued
             const allTracks = [];
@@ -1184,13 +1188,19 @@ async function handleNowPlayingButton(context) {
             new ButtonBuilder().setCustomId(`np_volup|${guildId}`).setEmoji('🔊').setStyle(ButtonStyle.Secondary)
         );
         const row2 = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`np_shuffle|${guildId}`).setLabel('Shuffle').setEmoji('🔀').setStyle(queue.shuffle ? ButtonStyle.Success : ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId(`np_savequeue|${guildId}`).setLabel('Queue speichern').setEmoji('💾').setStyle(ButtonStyle.Success)
         );
 
         await interaction.update({ embeds: [embed], components: [row, row2] });
     } catch (e) {
         logger.warn(`[NP BUTTON] ${e.message}`);
-        await interaction.deferUpdate().catch(() => { });
+        // Give user feedback instead of failing silently
+        if (!interaction.replied && !interaction.deferred) {
+            await interaction.reply({ content: '❌ Aktion fehlgeschlagen.', ephemeral: true }).catch(() => { });
+        } else {
+            await interaction.deferUpdate().catch(() => { });
+        }
     }
 }
 
