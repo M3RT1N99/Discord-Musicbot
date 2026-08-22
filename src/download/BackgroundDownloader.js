@@ -51,9 +51,10 @@ class BackgroundDownloader {
 
             logger.debug(`[BG-PROCESS] Starting: ${track.url} (Remaining: ${this.queue.length})`);
 
-            // Skip if track already has filepath or guild gone
+            // Skip if track already has filepath, is being downloaded elsewhere
+            // (e.g. lazy download in QueueManager), or guild gone
             const guildQueue = guildQueues.get(guildId);
-            if (!guildQueue || track.filepath) continue;
+            if (!guildQueue || track.filepath || track._dlPromise) continue;
 
             // Check cache first
             if (this.audioCache.has(track.url)) {
@@ -73,18 +74,23 @@ class BackgroundDownloader {
                 const tempFilename = `song_${Date.now()}_${randomUUID().slice(0, 8)}.opus`;
                 const filepath = path.join(DOWNLOAD_DIR, tempFilename);
 
-                // Download with progress
+                // Download with progress. Contract with QueueManager lazy download:
+                // the running download is exposed as track._dlPromise; on success
+                // track.filepath is set BEFORE the promise settles, and _dlPromise
+                // is cleared in finally.
                 const progressManager = new DownloadProgressManager();
-                await downloadSingleTo(filepath, track.url, (data) => {
+                track._dlPromise = downloadSingleTo(filepath, track.url, (data) => {
                     // Parse progress using unified manager
                     const parsed = progressManager.parseProgress(data);
                     if (parsed && progressManager.shouldUpdate(parsed.percent)) {
                         this.updatePlaylistProgress(guildId, track, parsed.percent, parsed.speed);
                     }
+                }).then((result) => {
+                    // Success: set filepath before _dlPromise is cleared
+                    track.filepath = filepath;
+                    return result;
                 });
-
-                // Success
-                track.filepath = filepath;
+                await track._dlPromise;
 
                 // Get info for cache if title missing
                 if (!track.duration || track.title === "Unbekannt") {
@@ -100,6 +106,8 @@ class BackgroundDownloader {
                 logger.debug(`[BG-PROCESS] Finished: ${track.url}`);
             } catch (err) {
                 logger.warn(`[BG DOWNLOAD ERROR] ${track.url}: ${err.message}`);
+            } finally {
+                track._dlPromise = null;
             }
 
             // Longer delay to yield event loop and reduce CPU contention

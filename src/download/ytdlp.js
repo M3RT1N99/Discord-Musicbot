@@ -317,6 +317,16 @@ async function searchYouTubeVideos(query, maxResults = 10) {
 }
 
 /**
+ * Best-effort removal of partial download artifacts (fire-and-forget).
+ * Removes the target file and its yt-dlp .part companion; errors are ignored.
+ * @param {string} filepath - Destination filepath of the failed download
+ */
+function cleanupPartialDownload(filepath) {
+    fs.promises.unlink(filepath).catch(() => { });
+    fs.promises.unlink(`${filepath}.part`).catch(() => { });
+}
+
+/**
  * Downloads single video to filepath with progress callback
  * @param {string} filepath - Destination filepath
  * @param {string} urlOrId - Video URL or ID
@@ -399,11 +409,13 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
         // Timeout if download hangs
         const timer = setTimeout(() => {
             proc.kill("SIGKILL");
+            cleanupPartialDownload(normalizedPath);
             reject(new Error("Download timeout"));
         }, DOWNLOAD_TIMEOUT_MS);
 
         proc.on("error", err => {
             clearTimeout(timer);
+            cleanupPartialDownload(normalizedPath);
             reject(err);
         });
 
@@ -412,6 +424,7 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
             if (code === 0 && fs.existsSync(normalizedPath)) {
                 resolve({ filepath: normalizedPath, stderr });
             } else {
+                cleanupPartialDownload(normalizedPath);
                 reject(new Error(`yt-dlp failed (${code}): ${stderr.split("\n").slice(-6).join("\n")}`));
             }
         });

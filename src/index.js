@@ -2,7 +2,8 @@
 // Main entry point for Discord Musicbot
 // Refactored architecture with modular components
 
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
+const fs = require('fs');
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, Status } = require('discord.js');
 const { TOKEN, DOWNLOAD_DIR } = require('./config/constants');
 const logger = require('./utils/logger');
 const AudioCache = require('./cache/AudioCache');
@@ -21,6 +22,15 @@ const audioCache = new AudioCache(undefined, DOWNLOAD_DIR);
 const searchCache = new SearchCache();
 const rateLimiter = new RateLimiter();
 const backgroundDownloader = new BackgroundDownloader(audioCache, () => guildQueues);
+
+// Protect files still referenced by any guild queue from cache eviction
+audioCache.setInUseChecker((filepath) => {
+    for (const q of guildQueues.values()) {
+        if (q.currentTrack?.filepath === filepath || q.previousTrack?.filepath === filepath) return true;
+        if (q.songs.some(s => s.filepath === filepath)) return true;
+    }
+    return false;
+});
 
 // Log startup
 logger.info('='.repeat(60));
@@ -92,12 +102,30 @@ const client = new Client({
         GatewayIntentBits.GuildVoiceStates,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent
-    ]
+    ],
+    // Bot messages echo user-controlled video titles — never let them ping
+    allowedMentions: { parse: [], repliedUser: false }
 });
 
 // --------------------------- Client Ready Event ---------------------------
 client.once("clientReady", async () => {
     logger.setClient(client);
+
+    // Status files consumed by the container healthcheck and the yt-dlp
+    // update-checker in entrypoint.sh (defers restarts while queues are active).
+    const writeStatusFiles = () => {
+        // Heartbeat only while the gateway is actually connected — a live event
+        // loop with a dead Discord connection must go unhealthy (and must not
+        // block yt-dlp update restarts with a stale queue count).
+        // Per-shard check: ws.status stays Ready after the first connect even if
+        // the gateway later dies — shard.status reflects the live connection.
+        const connected = client.ws.shards.size > 0 && client.ws.shards.every(s => s.status === Status.Ready);
+        if (connected) fs.promises.writeFile('/tmp/bot_heartbeat', String(Date.now())).catch(() => { });
+        fs.promises.writeFile('/tmp/bot_active_queues', String(connected ? guildQueues.size : 0)).catch(() => { });
+    };
+    writeStatusFiles();
+    setInterval(writeStatusFiles, 30000).unref();
+
     logger.info(`✅ Logged in as ${client.user.tag}`);
     logger.info(`📊 Connected to ${client.guilds.cache.size} guilds`);
 

@@ -88,6 +88,10 @@ async function handleSingleUrlPlay(context, url) {
     const queue = guildQueues.get(guildId);
     if (!queue) return;
 
+    if (remoteSongCount(queue) >= MAX_SONGS_PER_QUEUE) {
+        return await safeFollowUp(interaction, `❌ Queue-Limit erreicht (max. ${MAX_SONGS_PER_QUEUE} Songs).`);
+    }
+
     // --- Cache hit ---
     if (audioCache.has(url)) {
         const filepath = audioCache.get(url);
@@ -106,9 +110,9 @@ async function handleSingleUrlPlay(context, url) {
         await safeFollowUp(interaction, { embeds: [cacheEmbed] });
         logger.info(`[CACHE HIT] ${title}`);
 
-        if (queue.player.state.status !== AudioPlayerStatus.Playing) {
-            await ensureNextTrackDownloadedAndPlay(guildId, audioCache);
-        }
+        // Fire-and-forget: the serialized chain may be busy with a long download —
+        // never block the command response on it
+        ensureNextTrackDownloadedAndPlay(guildId, audioCache);
         return;
     }
 
@@ -124,6 +128,12 @@ async function handleSingleUrlPlay(context, url) {
         logger.error(`[VIDEO INFO ERROR] ${err.message}`);
         return await safeFollowUp(interaction, `❌ Konnte Video-Info nicht abrufen: ${err.message}`);
     }
+
+    // Push the track synchronously so it keeps its queue position (a playlist's
+    // remaining entries are pushed right after this call returns — the old
+    // push-on-download-completion put track #1 behind the whole playlist).
+    const track = { requesterId: interaction.user.id, title: video.title, filepath: null, url, duration: video.duration };
+    queue.songs.push(track);
 
     const downloadMessages = [];
     const startMsg = await safeFollowUp(interaction, '⬇️ Download gestartet, ich informiere dich, wenn das Lied bereit ist.');
@@ -149,40 +159,54 @@ async function handleSingleUrlPlay(context, url) {
         } catch { }
     };
 
-    downloadSingleTo(filepath, url, progressCb)
+    const deleteDownloadMessages = () => {
+        setTimeout(async () => {
+            for (const msg of downloadMessages) {
+                try { if (msg?.delete) await msg.delete(); } catch { }
+            }
+        }, 5000);
+    };
+
+    const dl = downloadSingleTo(filepath, url, progressCb);
+    track._dlPromise = dl;
+    dl
         .then(async () => {
-            // Re-fetch queue in case it was deleted during download (/stop, disconnect)
-            const currentQueue = guildQueues.get(guildId);
             audioCache.set(url, filepath, { title: video.title, duration: video.duration });
-            if (!currentQueue) {
-                logger.warn(`[DOWNLOAD] Queue gone for guild ${logger.guildTag(guildId)}, discarding downloaded track`);
+            track.filepath = filepath;
+            track._dlPromise = null;
+
+            // Queue replaced/deleted during download (/stop, disconnect): the file
+            // stays cached, but don't touch the new queue.
+            if (guildQueues.get(guildId) !== queue) {
+                logger.warn(`[DOWNLOAD] Queue gone for guild ${logger.guildTag(guildId)}, keeping track in cache only`);
                 return;
             }
-            currentQueue.songs.push({ requesterId: interaction.user.id, title: video.title, filepath, url, duration: video.duration });
 
             const finishMsg = await safeFollowUp(interaction, `✅ Download fertig: **${video.title}** — zur Queue hinzugefügt.`);
             downloadMessages.push(finishMsg);
+            deleteDownloadMessages();
 
-            // Lösche Download-Nachrichten nach 5s
-            setTimeout(async () => {
-                for (const msg of downloadMessages) {
-                    try { if (msg?.delete) await msg.delete(); } catch { }
-                }
-            }, 5000);
-
-            if (currentQueue.player.state.status !== AudioPlayerStatus.Playing) {
-                await ensureNextTrackDownloadedAndPlay(guildId, audioCache);
-            }
+            ensureNextTrackDownloadedAndPlay(guildId, audioCache);
         })
         .catch(async (err) => {
+            track._dlPromise = null;
             logger.error(`[DOWNLOAD ERROR] ${err.message}`);
+
+            const currentQueue = guildQueues.get(guildId);
+            if (currentQueue === queue) {
+                // Remove the failed track and kick the rest of the queue — without
+                // this, a failed first playlist track left everything silently stuck.
+                const i = queue.songs.indexOf(track);
+                if (i !== -1) {
+                    queue.songs.splice(i, 1);
+                    queue._nextPrepared = false;
+                }
+                ensureNextTrackDownloadedAndPlay(guildId, audioCache);
+            }
+
             const errorMsg = await safeFollowUp(interaction, `❌ Download fehlgeschlagen: ${err.message}`);
             downloadMessages.push(errorMsg);
-            setTimeout(async () => {
-                for (const msg of downloadMessages) {
-                    try { if (msg?.delete) await msg.delete(); } catch { }
-                }
-            }, 5000);
+            deleteDownloadMessages();
         });
 }
 
@@ -367,6 +391,10 @@ async function handlePlayCommand(context) {
         if (addedCount < restEntries.length) msg += `\n⚠️ Queue-Limit erreicht (max. ${MAX_SONGS_PER_QUEUE}).`;
         if (startIndex > 0) msg += `\n▶️ Starte bei Track #${startIndex + 1}.`;
         await safeFollowUp(interaction, msg);
+
+        // Kick playback even if the first track's info/download failed — otherwise
+        // the freshly filled queue would sit silent until the next command.
+        ensureNextTrackDownloadedAndPlay(interaction.guildId, audioCache);
         return;
     }
 
@@ -575,7 +603,7 @@ async function handleQueueCommand(context) {
         message += '📋 Queue ist leer — nur der aktuelle Song läuft.';
     }
 
-    await interaction.reply(message);
+    await interaction.reply(truncateMessage(message, 1900));
 }
 
 /**
@@ -739,9 +767,7 @@ async function handlePlaycacheCommand(context) {
     if (remoteSongCount(queue) >= MAX_SONGS_PER_QUEUE) replyMsg += `\n⚠️ Queue-Limit erreicht (max. ${MAX_SONGS_PER_QUEUE}).`;
     await interaction.editReply(replyMsg);
 
-    if (queue.player.state.status !== AudioPlayerStatus.Playing) {
-        await ensureNextTrackDownloadedAndPlay(interaction.guildId, audioCache);
-    }
+    ensureNextTrackDownloadedAndPlay(interaction.guildId, audioCache);
 }
 
 /**
@@ -819,9 +845,7 @@ async function handlePlaychristCommand(context) {
 
     await interaction.editReply(replyMsg);
 
-    if (queue.player.state.status !== AudioPlayerStatus.Playing) {
-        await ensureNextTrackDownloadedAndPlay(interaction.guildId, audioCache);
-    }
+    ensureNextTrackDownloadedAndPlay(interaction.guildId, audioCache);
 }
 
 /**
@@ -1036,6 +1060,9 @@ async function handlePlaylistChoiceButton(context) {
             if (startIndex > 0) msg += `\n▶️ Starte bei Track #${startIndex + 1}.`;
             await safeFollowUp(interaction, msg);
 
+            // Kick playback even if the first track's info/download failed
+            ensureNextTrackDownloadedAndPlay(interaction.guildId, context.audioCache);
+
         } catch (e) {
             logger.error(`[PLAYLIST BUTTON] ${e.message}`);
             await safeFollowUp(interaction, `❌ Fehler: ${e.message}`);
@@ -1082,7 +1109,14 @@ async function handleNowPlayingButton(context) {
                 }
                 queue.songs.unshift(queue.previousTrack);
                 queue.previousTrack = null;
-                skipCurrentTrack(guildId); // Triggers Idle → plays the unshifted prev track
+                // Pin this explicit pick — with shuffle active, prepareNextTrack
+                // would otherwise re-roll a random track over the previous one
+                queue._nextPrepared = true;
+                if (queue.player.state.status === AudioPlayerStatus.Idle && !queue.currentFfmpeg) {
+                    ensureNextTrackDownloadedAndPlay(guildId, queue.audioCache);
+                } else {
+                    skipCurrentTrack(guildId); // Triggers Idle → plays the unshifted prev track
+                }
                 return interaction.deferUpdate();
             } else {
                 return interaction.reply({ content: '⏮️ Kein vorheriger Song vorhanden.', ephemeral: true });

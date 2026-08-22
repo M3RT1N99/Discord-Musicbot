@@ -59,6 +59,14 @@ function createPlayerForGuild(guildId, connection) {
         const queue = guildQueues.get(guildId);
         if (!queue || queue.isCleaningUp) return;
 
+        // The ended track's ffmpeg can outlive the resource (backpressure keeps it
+        // paused mid-file, e.g. after a player error). Kill it here — otherwise
+        // currentFfmpeg stays set forever and the busy guard stalls the queue.
+        if (queue.currentFfmpeg) {
+            safeKillFfmpeg(queue.currentFfmpeg);
+            queue.currentFfmpeg = null;
+        }
+
         if (queue && queue.nowPlayingMessage) {
             queue.nowPlayingMessage.delete().catch(() => {
                 // Ignore errors (e.g., message already deleted)
@@ -92,32 +100,58 @@ function createPlayerForGuild(guildId, connection) {
     return player;
 }
 
+// Per-guild serialization of ensureNextTrackDownloadedAndPlay. Concurrent callers
+// (Idle handler, finished downloads, /play variants) previously raced each other
+// across the await gaps and could advance the queue twice, killing the freshly
+// spawned ffmpeg of the first advance.
+const ensureChains = new Map();
+
 /**
- * Ensures next track is downloaded and plays it
+ * Ensures next track is downloaded and plays it. Safe to call from anywhere at
+ * any time: calls for the same guild run strictly one after another.
  * @param {string} guildId - Guild ID
  * @param {object} audioCache - Audio cache instance
  */
-async function ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth = 0) {
-    if (_depth > 10) {
-        logger.warn(`[RECURSION LIMIT][${logger.guildTag(guildId)}] ensureNextTrackDownloadedAndPlay exceeded max depth, stopping`);
-        return;
-    }
+function ensureNextTrackDownloadedAndPlay(guildId, audioCache) {
+    const prev = ensureChains.get(guildId) || Promise.resolve();
+    const run = prev.then(() => _ensureNext(guildId, audioCache, 0)).catch(e =>
+        logger.error(`[ENSURE NEXT ERROR][${logger.guildTag(guildId)}] ${e?.message || e}`)
+    );
+    ensureChains.set(guildId, run);
+    run.then(() => {
+        if (ensureChains.get(guildId) === run) ensureChains.delete(guildId);
+    });
+    return run;
+}
+
+async function _ensureNext(guildId, audioCache, depth) {
     const q = guildQueues.get(guildId);
     if (!q || q.isCleaningUp) return;
+    audioCache = audioCache || q.audioCache;
 
-    if (q.songs.length === 0) {
-        // Nothing left -> cleanup connection
-        q.isCleaningUp = true;
-        try { q.connection.destroy(); } catch { }
-        guildQueues.delete(guildId);
+    if (depth > 25) {
+        logger.warn(`[RECURSION LIMIT][${logger.guildTag(guildId)}] Too many consecutive bad queue entries, stopping playback`);
+        if (q.lastInteractionChannel) {
+            q.lastInteractionChannel.send({ content: '🛑 Zu viele fehlerhafte Queue-Einträge hintereinander — Wiedergabe gestoppt.', flags: [MessageFlags.SuppressNotifications] }).catch(() => { });
+        }
+        deleteGuildQueue(guildId);
         return;
     }
 
-    // If player already playing, do nothing
-    if (q.player.state.status === AudioPlayerStatus.Playing) return;
-
-    // Race condition check: already downloading?
+    // Only start something new when the player is truly idle. Paused/AutoPaused/
+    // Buffering count as busy — otherwise adding a song while paused would replace
+    // the paused track. A track prebuffering in ffmpeg also counts as busy.
+    // These checks MUST come before the empty-queue teardown: songs is empty
+    // while the (shifted-out) current track is still playing.
+    if (q.player.state.status !== AudioPlayerStatus.Idle) return;
+    if (q.currentFfmpeg) return;
     if (q.isDownloading) return;
+
+    if (q.songs.length === 0) {
+        // Nothing left and nothing playing -> cleanup connection
+        deleteGuildQueue(guildId);
+        return;
+    }
 
     // Shuffle-aware selection: ensure songs[0] is the track we'll actually play
     prepareNextTrack(q);
@@ -126,20 +160,45 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth = 0)
     const next = q.songs[0];
     if (!next) return;
 
+    // Someone else (BackgroundDownloader, playlist first track) is already
+    // downloading this track — wait for it instead of downloading twice.
+    if (!next.filepath && next._dlPromise) {
+        try { await next._dlPromise; } catch { }
+        if (guildQueues.get(guildId) !== q) return;
+        return _ensureNext(guildId, audioCache, depth + 1);
+    }
+
     // If filepath exists -> play immediately
     if (next.filepath) {
-        try {
-            await fs.promises.access(next.filepath);
+        let fileOk = true;
+        try { await fs.promises.access(next.filepath); } catch { fileOk = false; }
+        // Revalidate: the queue may have been replaced, the player started, or the
+        // head track changed (skip) while we were suspended on the await.
+        if (guildQueues.get(guildId) !== q || q.isCleaningUp) return;
+        if (q.player.state.status !== AudioPlayerStatus.Idle || q.currentFfmpeg) return;
+        if (q.songs[0] !== next) return _ensureNext(guildId, audioCache, depth + 1);
+
+        if (fileOk) {
             playNextInGuild(guildId);
             return;
-        } catch { }
+        }
+
+        // File vanished (e.g. cache eviction): re-download if possible, else drop.
+        logger.warn(`[FILE MISSING][${logger.guildTag(guildId)}] ${next.filepath} — ${next.url ? 're-downloading' : 'dropping track'}`);
+        next.filepath = null;
+        if (!next.url) {
+            q.songs.shift();
+            q._nextPrepared = false;
+        }
+        return _ensureNext(guildId, audioCache, depth + 1);
     }
 
     // Need to download next.url (lazy)
     if (!next.url) {
         // Invalid entry -> drop and try next
         q.songs.shift();
-        return await ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth + 1);
+        q._nextPrepared = false;
+        return _ensureNext(guildId, audioCache, depth + 1);
     }
 
     // Build filepath
@@ -151,21 +210,33 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth = 0)
         q.lastInteractionChannel.send({ content: `⬇️ Lade: ${next.title || next.url}`.substring(0, 120), flags: [MessageFlags.SuppressNotifications] }).catch(() => { });
     }
 
+    q.isDownloading = true;
+    logger.info(`[DOWNLOAD] ${filepath} from ${next.url}`);
+    const dl = downloadSingleTo(filepath, next.url, null);
+    next._dlPromise = dl;
     try {
-        q.isDownloading = true;
-        logger.info(`[DOWNLOAD] ${filepath} from ${next.url}`);
-        await downloadSingleTo(filepath, next.url, null);
+        await dl;
+        next._dlPromise = null;
+        q.isDownloading = false;
 
         if (audioCache) {
             audioCache.set(next.url, filepath, { title: next.title, duration: next.duration });
         }
-
         next.filepath = filepath;
-        q.isDownloading = false;
+
+        // Queue replaced during the download (/stop + /play): the file is cached,
+        // but the new queue manages itself — don't touch it.
+        if (guildQueues.get(guildId) !== q || q.isCleaningUp) return;
+
         q.consecutiveErrors = 0; // Reset error counter on success
-        playNextInGuild(guildId);
+        return _ensureNext(guildId, audioCache, depth + 1);
     } catch (e) {
+        next._dlPromise = null;
         q.isDownloading = false;
+
+        // Stale continuation after queue replacement — don't touch the new queue.
+        if (guildQueues.get(guildId) !== q || q.isCleaningUp) return;
+
         logger.error(`[NEXT DOWNLOAD ERROR] ${e?.message || e}`);
 
         // Error counting
@@ -175,23 +246,21 @@ async function ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth = 0)
             if (q.lastInteractionChannel) {
                 q.lastInteractionChannel.send({ content: "🛑 Zu viele Fehler hintereinander (5). Stoppe Wiedergabe um Spam zu vermeiden.", flags: [MessageFlags.SuppressNotifications] }).catch(() => { });
             }
-            // Cleanup
-            q.isCleaningUp = true;
-            try { q.player.stop(); } catch { }
-            try { q.connection.destroy(); } catch { }
-            guildQueues.delete(guildId);
+            deleteGuildQueue(guildId);
             return;
         }
 
-        // Notify and remove track
+        // Notify and remove track (by identity — the head may have changed)
         if (q.lastInteractionChannel) {
             const msg = `⚠️ Fehler beim Laden von ${next.title || next.url}: ${e.message}`;
             q.lastInteractionChannel.send({ content: msg.substring(0, 200), flags: [MessageFlags.SuppressNotifications] }).catch(() => { });
         }
 
-        q.songs.shift();
+        const i = q.songs.indexOf(next);
+        if (i !== -1) q.songs.splice(i, 1);
+        q._nextPrepared = false;
         // Try next with delay to prevent spam
-        setTimeout(() => ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth + 1), 500);
+        setTimeout(() => ensureNextTrackDownloadedAndPlay(guildId, audioCache), 500);
     }
 }
 
@@ -220,6 +289,8 @@ function prepareNextTrack(q) {
 function playNextInGuild(guildId) {
     const q = guildQueues.get(guildId);
     if (!q || q.isCleaningUp) return;
+    // Never replace an active resource: only advance when idle and no prebuffer runs
+    if (q.player.state.status !== AudioPlayerStatus.Idle || q.currentFfmpeg) return;
 
     prepareNextTrack(q);
     const track = q.songs.shift();
@@ -229,12 +300,6 @@ function playNextInGuild(guildId) {
     // Save previous track for "back" button, set current
     q.previousTrack = q.currentTrack || null;
     q.currentTrack = track;
-
-    // Clean up any existing buffering process
-    if (q.currentFfmpeg) {
-        safeKillFfmpeg(q.currentFfmpeg);
-        q.currentFfmpeg = null;
-    }
 
     // Use ffmpeg to convert to Raw PCM (s16le) - the most stable timing format.
     // Small 2MB PassThrough jitter buffer (not the old 150MB Buffer.concat) smooths
@@ -313,20 +378,20 @@ function playNextInGuild(guildId) {
     });
 
     ffmpeg.on('close', (code) => {
-        q.currentFfmpeg = null;
+        if (q.currentFfmpeg === ffmpeg) q.currentFfmpeg = null;
         ffmpegClosed = true;
 
         if (chunks.length === 0 && !isPlaying) {
             logger.error(`[FFMPEG ERROR] No audio data for track ${track.title}: ${stderr.split('\n').slice(-3).join('\n')}`);
             stream.destroy();
-            if (!q.isCleaningUp) playNextInGuild(guildId);
+            if (!q.isCleaningUp) ensureNextTrackDownloadedAndPlay(guildId, q.audioCache);
             return;
         }
 
         if (code !== 0 && !isPlaying) {
             logger.error(`[FFMPEG ERROR] Failed to buffer track ${track.title}: ${stderr.split('\n').slice(-3).join('\n')}`);
             stream.destroy();
-            if (!q.isCleaningUp) playNextInGuild(guildId);
+            if (!q.isCleaningUp) ensureNextTrackDownloadedAndPlay(guildId, q.audioCache);
             return;
         }
 
@@ -339,11 +404,11 @@ function playNextInGuild(guildId) {
     });
 
     ffmpeg.on('error', (err) => {
-        q.currentFfmpeg = null;
+        if (q.currentFfmpeg === ffmpeg) q.currentFfmpeg = null;
         logger.error(`[FFMPEG SPAWN ERROR] ${err.message}`);
         if (!isPlaying) {
             stream.destroy();
-            if (!q.isCleaningUp) playNextInGuild(guildId);
+            if (!q.isCleaningUp) ensureNextTrackDownloadedAndPlay(guildId, q.audioCache);
         } else {
             stream.destroy(err);
         }
@@ -451,12 +516,15 @@ function createGuildQueue(guildId, connection, player, channel) {
  * @param {ChildProcess} ffmpeg - FFmpeg process
  */
 function safeKillFfmpeg(ffmpeg) {
-    if (!ffmpeg || ffmpeg.killed) return;
+    // ffmpeg.killed only means "a signal was SENT", not "the process exited" —
+    // exitCode/signalCode are the reliable liveness check.
+    const isDead = () => ffmpeg.exitCode !== null || ffmpeg.signalCode !== null;
+    if (!ffmpeg || isDead()) return;
     try {
         ffmpeg.kill('SIGTERM');
         // Force-kill after 5 seconds if still alive
         const killTimeout = setTimeout(() => {
-            try { if (!ffmpeg.killed) ffmpeg.kill('SIGKILL'); } catch { }
+            try { if (!isDead()) ffmpeg.kill('SIGKILL'); } catch { }
         }, 5000);
         killTimeout.unref();
     } catch { }
@@ -468,7 +536,10 @@ function safeKillFfmpeg(ffmpeg) {
  */
 function cleanupGuildResources(guildId) {
     const queue = guildQueues.get(guildId);
-    if (!queue) return;
+    // Re-entrancy guard: destroying the connection below fires the Destroyed
+    // listener, which calls this function again.
+    if (!queue || queue._cleanupStarted) return;
+    queue._cleanupStarted = true;
     queue.isCleaningUp = true;
 
     // Kill FFmpeg process
@@ -492,33 +563,25 @@ function cleanupGuildResources(guildId) {
     queue.playlistProgressMsg = null;
 
     guildQueues.delete(guildId);
+
+    // Destroy the voice connection. Without this, @discordjs/voice keeps the
+    // stale connection (with this session's listeners attached) in its registry
+    // and hands it back on the next join — listeners would pile up forever.
+    try {
+        if (queue.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+            queue.connection.destroy();
+        }
+    } catch { }
+
     logger.info(`[CLEANUP][${logger.guildTag(guildId)}] Guild resources cleaned up`);
 }
 
 /**
- * Deletes guild queue
+ * Deletes guild queue (alias for the full cleanup: ffmpeg, player, connection)
  * @param {string} guildId - Guild ID
  */
 function deleteGuildQueue(guildId) {
-    const queue = guildQueues.get(guildId);
-    if (queue) {
-        queue.isCleaningUp = true;
-        if (queue.currentFfmpeg) {
-            safeKillFfmpeg(queue.currentFfmpeg);
-            queue.currentFfmpeg = null;
-        }
-        try { queue.player.stop(); } catch { }
-        try { queue.connection.destroy(); } catch { }
-        queue.songs.length = 0;
-        queue.currentTrack = null;
-        queue.previousTrack = null;
-        queue.currentResource = null;
-        if (queue.nowPlayingMessage) {
-            queue.nowPlayingMessage.delete().catch(() => { });
-        }
-        queue.nowPlayingMessage = null;
-        guildQueues.delete(guildId);
-    }
+    cleanupGuildResources(guildId);
 }
 
 /**
@@ -529,6 +592,23 @@ function deleteGuildQueue(guildId) {
 function skipCurrentTrack(guildId) {
     const queue = guildQueues.get(guildId);
     if (!queue || queue.isCleaningUp) return false;
+
+    if (queue.player.state.status === AudioPlayerStatus.Idle) {
+        if (queue.currentFfmpeg) {
+            // Track is still prebuffering: kill its ffmpeg — the close handler
+            // advances the queue. skipRequested stays false (no Idle event will
+            // fire for a resource that never played).
+            safeKillFfmpeg(queue.currentFfmpeg);
+            queue.currentFfmpeg = null;
+        } else if (queue.songs.length > 0) {
+            // Nothing playing (e.g. next track still downloading): drop the
+            // upcoming track instead of setting skipRequested, which would
+            // wrongly suppress the loop re-queue at the NEXT natural song end.
+            queue.songs.shift();
+            queue._nextPrepared = false;
+        }
+        return true;
+    }
 
     queue.skipRequested = true;
     if (queue.currentFfmpeg) {

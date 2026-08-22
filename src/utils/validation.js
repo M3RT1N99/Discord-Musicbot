@@ -86,10 +86,10 @@ function validateUrl(urlString) {
         // Only allow HTTP/HTTPS
         if (!['http:', 'https:'].includes(url.protocol)) return false;
 
-        // Check for dangerous URL patterns
-        const fullUrl = urlString.toLowerCase();
+        // Check hostname against blocked patterns (SSRF protection)
+        const hostname = url.hostname.toLowerCase();
         for (const pattern of BLOCKED_URL_PATTERNS) {
-            if (pattern.test(fullUrl)) return false;
+            if (pattern.test(hostname)) return false;
         }
 
         // Check for dangerous characters in URL

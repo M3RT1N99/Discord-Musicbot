@@ -2,9 +2,39 @@
 // Voice connection management
 
 const { joinVoiceChannel } = require('@discordjs/voice');
-const { PermissionsBitField } = require('discord.js');
+const { ChannelType, PermissionsBitField } = require('discord.js');
 const { JOIN_RETRIES } = require('../config/constants');
 const logger = require('../utils/logger');
+
+/**
+ * Ensures the bot becomes a speaker on a stage channel (bots join as suppressed audience).
+ * Retries a few times because the bot's voice state may not exist right after joining.
+ * Never throws — logs a warning if the bot lacks stage moderator permissions.
+ * @param {StageChannel} voiceChannel - Stage channel the bot joined
+ */
+async function ensureStageSpeaker(voiceChannel) {
+    const maxAttempts = 3;
+    let lastErr;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            const voiceState = voiceChannel.guild.members.me?.voice;
+            if (!voiceState || voiceState.channelId !== voiceChannel.id) {
+                throw new Error('Voice state not available yet');
+            }
+            await voiceState.setSuppressed(false);
+            logger.info(`[VOICE] Unsuppressed on stage channel: ${voiceChannel.name}`);
+            return;
+        } catch (e) {
+            lastErr = e;
+            if (attempt < maxAttempts) {
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        }
+    }
+
+    logger.warn(`[VOICE] Could not unsuppress on stage channel "${voiceChannel.name}": ${lastErr?.message || lastErr} — bot must be a stage moderator (MuteMembers permission) to be audible.`);
+}
 
 /**
  * Joins voice channel with retry logic
@@ -33,6 +63,14 @@ async function joinVoiceChannelWithRetry(voiceChannel, retries = JOIN_RETRIES) {
             });
 
             logger.info(`[VOICE] Joined channel: ${voiceChannel.name} in guild: ${voiceChannel.guild.name}`);
+
+            // Stage channels: bot joins as suppressed audience — request speaker (non-blocking)
+            if (voiceChannel.type === ChannelType.GuildStageVoice) {
+                ensureStageSpeaker(voiceChannel).catch(e =>
+                    logger.warn(`[VOICE] Stage unsuppress error: ${e?.message || e}`)
+                );
+            }
+
             return connection;
         } catch (e) {
             lastErr = e;

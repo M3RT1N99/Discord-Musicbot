@@ -20,8 +20,33 @@ class AudioCache {
         this.downloadDir = downloadDir;
         this.indexFile = path.join(downloadDir, ".cache_index.json");
         this.cache = new Map(); // key -> { filepath, filename, ts, meta }
+        this.inUseChecker = () => false; // Overridden via setInUseChecker()
         this.ensureDir(downloadDir);
         this.load();
+        // Fire-and-forget: remove orphaned files not referenced by the index
+        this.reconcileOrphans().catch(e => logger.warn(`[CACHE] Orphan cleanup failed: ${e.message}`));
+    }
+
+    /**
+     * Sets the checker used to protect files that are still referenced
+     * (e.g. by a guild queue) from being deleted by eviction/overwrite.
+     * @param {Function} fn - (filepath) => boolean, true if file is in use
+     */
+    setInUseChecker(fn) {
+        this.inUseChecker = typeof fn === 'function' ? fn : (() => false);
+    }
+
+    /**
+     * Checks whether a filepath is currently in use (best-effort)
+     * @param {string} filepath - Path to check
+     * @returns {boolean} True if file is in use
+     */
+    isInUse(filepath) {
+        try {
+            return !!this.inUseChecker(filepath);
+        } catch {
+            return false;
+        }
     }
 
     /**
@@ -48,6 +73,54 @@ class AudioCache {
         } catch (e) {
             logger.warn(`[CACHE] Load failed: ${e.message}`);
             this.cache = new Map();
+            // A corrupt index must not make every cached file look orphaned
+            this.loadFailed = true;
+        }
+    }
+
+    /**
+     * Scans the download directory and deletes files that are not referenced
+     * by the index and are older than 1 hour (mtime). The age threshold
+     * protects downloads that are currently in progress. Best-effort:
+     * errors are logged but never thrown.
+     */
+    async reconcileOrphans() {
+        const ORPHAN_MIN_AGE_MS = 60 * 60 * 1000; // 1 hour
+        // Only ever touch the bot's own download files — the download dir is a
+        // host bind mount and may contain unrelated user files.
+        const OWN_FILE_PATTERN = /^song_\d+_[0-9a-f]{8}\./i;
+        if (this.loadFailed) {
+            logger.warn('[CACHE] Skipping orphan cleanup: index failed to load');
+            return;
+        }
+        try {
+            const referenced = new Set();
+            for (const entry of this.cache.values()) {
+                if (entry.filepath) referenced.add(path.resolve(entry.filepath));
+            }
+            const indexPath = path.resolve(this.indexFile);
+
+            const names = await fs.promises.readdir(this.downloadDir);
+            const now = Date.now();
+            let deleted = 0;
+            for (const name of names) {
+                if (!OWN_FILE_PATTERN.test(name)) continue;
+                const full = path.resolve(this.downloadDir, name);
+                if (full === indexPath) continue; // Never delete the index itself
+                if (referenced.has(full)) continue;
+                try {
+                    const stat = await fs.promises.stat(full);
+                    if (!stat.isFile()) continue;
+                    if (now - stat.mtimeMs < ORPHAN_MIN_AGE_MS) continue; // Possibly a running download
+                    await fs.promises.unlink(full);
+                    deleted++;
+                } catch { /* ignore individual file errors */ }
+            }
+            if (deleted > 0) {
+                logger.info(`[CACHE] Orphan cleanup: deleted ${deleted} unreferenced file(s)`);
+            }
+        } catch (e) {
+            logger.warn(`[CACHE] Orphan scan failed: ${e.message}`);
         }
     }
 
@@ -64,7 +137,9 @@ class AudioCache {
      * Saves cache index to disk (debounced).
      */
     save() {
-        if (this.saveTimer) clearTimeout(this.saveTimer);
+        // Keep an already-armed timer: resetting it on every call would postpone
+        // the write indefinitely under sustained activity (max 60s latency instead).
+        if (this.saveTimer) return;
         this.saveTimer = setTimeout(async () => {
             try {
                 this.saveTimer = null;
@@ -117,6 +192,9 @@ class AudioCache {
             this.save();
             return false;
         }
+        // LRU: refresh timestamp on hit
+        e.ts = Date.now();
+        this.save();
         return true;
     }
 
@@ -127,7 +205,12 @@ class AudioCache {
      */
     get(url) {
         const key = this.makeKeyFromUrl(url);
-        return this.cache.get(key)?.filepath || null;
+        const e = this.cache.get(key);
+        if (!e) return null;
+        // LRU: refresh timestamp on hit
+        e.ts = Date.now();
+        this.save();
+        return e.filepath || null;
     }
 
     /**
@@ -148,6 +231,13 @@ class AudioCache {
      */
     set(url, filepath, meta = {}) {
         const key = this.makeKeyFromUrl(url);
+
+        // Overwrite: remove the previous file so it does not stay orphaned on disk
+        const existing = this.cache.get(key);
+        if (existing?.filepath && existing.filepath !== filepath && !this.isInUse(existing.filepath)) {
+            fs.promises.unlink(existing.filepath).catch(() => { });
+        }
+
         this.cache.set(key, {
             filepath,
             filename: path.basename(filepath),
@@ -155,17 +245,24 @@ class AudioCache {
             meta
         });
 
-        // LRU eviction
+        // LRU eviction (oldest first, skipping files that are still in use)
         if (this.cache.size > this.maxEntries) {
             const sorted = [...this.cache.entries()].sort((a, b) => a[1].ts - b[1].ts);
             const toRemove = Math.ceil(this.maxEntries * 0.2);
-            for (let i = 0; i < toRemove; i++) {
-                const [k, v] = sorted[i];
+            let removed = 0;
+            for (const [k, v] of sorted) {
+                if (removed >= toRemove) break;
+                if (k === key) continue; // Never evict the entry just added
+                if (v.filepath && this.isInUse(v.filepath)) continue; // Still referenced (e.g. guild queue)
                 // Async unlink, ignore errors
                 if (v.filepath) {
                     fs.promises.unlink(v.filepath).catch(() => { });
                 }
                 this.cache.delete(k);
+                removed++;
+            }
+            if (removed < toRemove) {
+                logger.warn(`[CACHE] Eviction incomplete: ${removed}/${toRemove} removed, remaining candidates are in use (size=${this.cache.size})`);
             }
         }
         this.save();

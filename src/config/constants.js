@@ -15,20 +15,35 @@ const JOIN_RETRIES = 2; // retry join attempts on failure
 const PROGRESS_EDIT_INTERVAL_MS = 2500; // how often we edit progress message
 
 // --------------------------- Security Configuration ---------------------------
-// Blocked URL patterns for security
+// Blocked hostname patterns for security (SSRF protection).
+// Matched against the parsed, lowercased URL hostname — NOT the full URL string.
+// Protocol restrictions (http/https only) are enforced separately in validation.js.
 const BLOCKED_URL_PATTERNS = [
-    /localhost/i,
-    /127\.0\.0\.1/,
-    /192\.168\./,
-    /10\./,
-    /172\.(1[6-9]|2[0-9]|3[01])\./,
-    /169\.254\./,
-    /0\.0\.0\.0/,
-    /fc00:/,
-    /fe80:/,
-    /::1/,
-    /file:\/\//i,
-    /ftp:\/\//i
+    // Local / internal hostnames
+    /^localhost$/,
+    /\.localhost$/,
+    /\.local$/,
+    /\.lan$/,
+    /\.internal$/,
+    /\.home\.arpa$/,
+    /^[^.]+$/,                       // single-label hostnames without a dot (e.g. "tower", "nas")
+
+    // Private / reserved IPv4 ranges (anchored)
+    /^127\./,
+    /^10\./,
+    /^192\.168\./,
+    /^172\.(1[6-9]|2\d|3[01])\./,
+    /^169\.254\./,
+    /^0\./,
+
+    // Alternative IP encodings as complete hostname (e.g. http://2130706433/, http://0x7f000001/)
+    /^\d+$/,
+    /^0x[0-9a-f]+$/,
+
+    // IPv6 loopback / link-local / unique-local (URL hostname keeps the brackets)
+    /^\[::1\]$/,
+    /^\[fe80:/,
+    /^\[f[cd]/
 ];
 
 const MAX_QUERY_LENGTH = 500;
