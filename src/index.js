@@ -42,6 +42,7 @@ logger.info('='.repeat(60));
 const {
     handlePlayCommand,
     handleSelectCommand,
+    handleSearchSelect,
     handlePauseCommand,
     handleResumeCommand,
     handleSkipCommand,
@@ -255,6 +256,31 @@ client.on("interactionCreate", async interaction => {
                 await handleNowPlayingButton(context);
             } catch (err) {
                 logger.error(`[NP BUTTON ERROR] ${err.message}`);
+            }
+        }
+        return;
+    }
+
+    // --- Select menu interactions (search result picker) ---
+    if (interaction.isStringSelectMenu()) {
+        if (interaction.customId.startsWith('search_pick|')) {
+            const context = {
+                interaction,
+                audioCache,
+                searchCache,
+                rateLimiter,
+                backgroundDownloader,
+                guildQueues,
+                createPlayerForGuild,
+                createGuildQueue,
+                deleteGuildQueue,
+                commandBuilders,
+                logger
+            };
+            try {
+                await handleSearchSelect(context);
+            } catch (err) {
+                logger.error(`[SELECT MENU ERROR] ${err.message}`);
             }
         }
         return;

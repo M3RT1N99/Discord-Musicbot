@@ -3,8 +3,8 @@
 
 const path = require('path');
 const { randomUUID } = require('crypto');
-const { EmbedBuilder } = require('discord.js');
 const { DOWNLOAD_DIR, MAX_DOWNLOAD_QUEUE } = require('../config/constants');
+const { playlistProgressEmbed } = require('../ui/messages');
 const { downloadSingleTo, getVideoInfo } = require('./ytdlp');
 const DownloadProgressManager = require('./ProgressManager');
 const { truncateMessage } = require('../utils/formatting');
@@ -145,14 +145,14 @@ class BackgroundDownloader {
         const total = guildQueue.songs.filter(s => s.playlistTitle === track.playlistTitle).length;
         const downloaded = guildQueue.songs.filter(s => s.playlistTitle === track.playlistTitle && s.filepath).length;
 
-        const progressManager = new DownloadProgressManager();
-        const bar = progressManager.createProgressBar(percent);
-
-        const embed = new EmbedBuilder()
-            .setTitle(`⬇️ Playlist Download: ${track.playlistTitle}`)
-            .setDescription(`**Lade:** ${truncateMessage(track.title, 60)}\n${bar} ${percent.toFixed(0)}% ${speed ? `(${speed})` : ''}`)
-            .setFooter({ text: `Fortschritt: ${downloaded}/${total} Songs bereit` })
-            .setColor(percent === 100 ? 0x00FF00 : 0x1DB954);
+        const embed = playlistProgressEmbed({
+            playlistTitle: track.playlistTitle,
+            trackTitle: truncateMessage(track.title, 60),
+            percent,
+            speed,
+            downloaded,
+            total
+        });
 
         guildQueue.playlistProgressMsg.edit({ embeds: [embed] }).catch(() => {
             guildQueue.playlistProgressMsg = null; // Stop updating if message deleted

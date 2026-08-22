@@ -3,7 +3,8 @@
 const { createAudioPlayer, createAudioResource, NoSubscriberBehavior, AudioPlayerStatus, StreamType, VoiceConnectionStatus } = require('@discordjs/voice');
 const { spawn } = require('child_process');
 const { PassThrough } = require('stream');
-const { EmbedBuilder, MessageFlags, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { MessageFlags } = require('discord.js');
+const { buildNowPlayingCard, downloadProgressEmbed } = require('../ui/messages');
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
@@ -205,9 +206,12 @@ async function _ensureNext(guildId, audioCache, depth) {
     const filename = `song_${Date.now()}_${randomUUID().slice(0, 8)}.opus`;
     const filepath = path.join(DOWNLOAD_DIR, filename);
 
-    // Notify channel
+    // Notify channel (no progress source here — the embed shows "wird geladen…")
     if (q.lastInteractionChannel) {
-        q.lastInteractionChannel.send({ content: `⬇️ Lade: ${next.title || next.url}`.substring(0, 120), flags: [MessageFlags.SuppressNotifications] }).catch(() => { });
+        q.lastInteractionChannel.send({
+            embeds: [downloadProgressEmbed({ title: String(next.title || next.url).substring(0, 120), percent: null })],
+            flags: [MessageFlags.SuppressNotifications]
+        }).catch(() => { });
     }
 
     q.isDownloading = true;
@@ -422,42 +426,11 @@ function renderNowPlaying(guildId, track) {
     const q = guildQueues.get(guildId);
     if (!q || q.isCleaningUp) return;
 
-    // Send fancy Now Playing embed with player controls
+    // Send the Now Playing card (Components V2 container with controls)
     if (q.lastInteractionChannel) {
         try {
-            const volPercent = q.volume || 50;
-            const volBar = '█'.repeat(Math.round(volPercent / 10)) + '░'.repeat(10 - Math.round(volPercent / 10));
-            const queuePos = q.songs.length > 0 ? `${q.songs.length} Song${q.songs.length > 1 ? 's' : ''} in Queue` : 'Queue leer';
-            const title = track.title || path.basename(track.filepath);
-            const description = track.url ? `**[${title}](${track.url})**` : `**${title}**`;
-
-            const embed = new EmbedBuilder()
-                .setTitle('🎶 Now Playing')
-                .setDescription(description)
-                .addFields(
-                    { name: '⏱️ Dauer', value: String(track.duration || 'unbekannt'), inline: true },
-                    { name: '👤 Angefragt von', value: `<@${track.requesterId}>`, inline: true },
-                    { name: '🔊 Lautstärke', value: `\`${volBar}\` ${volPercent}%`, inline: true }
-                )
-                .setColor(0x1DB954)
-                .setTimestamp();
-
-            if (track.playlistTitle) {
-                embed.addFields({ name: '📋 Playlist', value: String(track.playlistTitle), inline: true });
-            }
-            embed.setFooter({ text: `🎵 ${queuePos} • ${q.loopMode !== 'off' ? (q.loopMode === 'song' ? '🔂 Repeat Song' : '🔁 Repeat Queue') : '➡️ Normal'}` });
-
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId(`np_prev|${guildId}`).setEmoji('⏮️').setStyle(ButtonStyle.Secondary),
-                new ButtonBuilder().setCustomId(`np_pause|${guildId}`).setEmoji('⏯️').setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId(`np_skip|${guildId}`).setEmoji('⏭️').setStyle(ButtonStyle.Secondary),
-                new ButtonBuilder().setCustomId(`np_voldn|${guildId}`).setEmoji('🔉').setStyle(ButtonStyle.Secondary),
-                new ButtonBuilder().setCustomId(`np_volup|${guildId}`).setEmoji('🔊').setStyle(ButtonStyle.Secondary)
-            );
-            const row2 = new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setCustomId(`np_shuffle|${guildId}`).setLabel('Shuffle').setEmoji('🔀').setStyle(q.shuffle ? ButtonStyle.Success : ButtonStyle.Secondary),
-                new ButtonBuilder().setCustomId(`np_savequeue|${guildId}`).setLabel('Queue speichern').setEmoji('💾').setStyle(ButtonStyle.Success)
-            );
+            const displayTrack = track.title ? track : { ...track, title: path.basename(track.filepath || '') };
+            const card = buildNowPlayingCard(guildId, q, displayTrack);
 
             // Delete old "Now Playing" message before sending new one
             if (q.nowPlayingMessage) {
@@ -465,7 +438,10 @@ function renderNowPlaying(guildId, track) {
                 q.nowPlayingMessage = null;
             }
 
-            q.lastInteractionChannel.send({ embeds: [embed], components: [row, row2], flags: [MessageFlags.SuppressNotifications] }).then(msg => {
+            q.lastInteractionChannel.send({
+                components: [card],
+                flags: [MessageFlags.IsComponentsV2, MessageFlags.SuppressNotifications]
+            }).then(msg => {
                 q.nowPlayingMessage = msg;
             }).catch(() => { });
         } catch (e) {

@@ -79,10 +79,9 @@ class DownloadProgressManager {
      * @returns {string} Progress bar string
      */
     createProgressBar(percent) {
-        const total = 15;
-        const progress = Math.round((percent / 100) * total);
-        const empty = total - progress;
-        return `[${'='.repeat(progress)}${' '.repeat(empty)}]`;
+        const total = 10;
+        const progress = Math.round((Math.max(0, Math.min(100, percent)) / 100) * total);
+        return '▰'.repeat(progress) + '▱'.repeat(total - progress);
     }
 
     /**

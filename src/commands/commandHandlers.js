@@ -4,16 +4,17 @@
 const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
-const { EmbedBuilder, REST, Routes, PermissionsBitField, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { REST, Routes, PermissionsBitField, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags: DjsMessageFlags } = require('discord.js');
 const { createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
 const { TOKEN, DOWNLOAD_DIR, MAPPING_DIR, LOCAL_AUDIO_EXTENSIONS, MAX_QUERY_LENGTH, SEARCH_CACHE_TIMEOUT, MAX_PENDING_CHOICES, MAX_SONGS_PER_QUEUE } = require('../config/constants');
 const { joinVoiceChannelWithRetry } = require('../voice/VoiceManager');
 const { downloadSingleTo, getVideoInfo, searchYouTubeVideos, getPlaylistEntries } = require('../download/ytdlp');
 const { isValidMediaUrl, validateSearchQuery, sanitizeString, isInteractionValid, safeFollowUp } = require('../utils/validation');
 const { isUrl, isYouTubePlaylistUrl, cleanYouTubeUrl, isRealPlaylist, cleanPlaylistUrl, hasVideoAndPlaylist } = require('../utils/urlCleaner');
-const { formatDuration, truncateMessage } = require('../utils/formatting');
+const { truncateMessage } = require('../utils/formatting');
 const DownloadProgressManager = require('../download/ProgressManager');
 const { ensureNextTrackDownloadedAndPlay, skipCurrentTrack } = require('../queue/QueueManager');
+const ui = require('../ui/messages');
 const logger = require('../utils/logger');
 
 // Pending playlist/song choices (short key -> { url, userId, createdAt })
@@ -51,6 +52,19 @@ async function ensureQueueAndJoin(context) {
         if (audioCache && !queue.audioCache) queue.audioCache = audioCache;
     }
     return queue;
+}
+
+/**
+ * Refreshes the Now Playing card after a slash command changes queue state
+ * (pause, volume, loop, shuffle), so buttons and status line stay in sync.
+ * @param {string} guildId - Guild ID
+ * @param {object} queue - Guild queue
+ */
+function refreshNowPlayingCard(guildId, queue) {
+    if (!queue?.nowPlayingMessage || !queue.currentTrack) return;
+    if (!queue.nowPlayingMessage.flags?.has(DjsMessageFlags.IsComponentsV2)) return;
+    const card = ui.buildNowPlayingCard(guildId, queue, queue.currentTrack);
+    queue.nowPlayingMessage.edit({ components: [card] }).catch(() => { });
 }
 
 async function collectLocalAudioFiles(baseDir) {
@@ -101,13 +115,7 @@ async function handleSingleUrlPlay(context, url) {
 
         queue.songs.push({ requesterId: interaction.user.id, title, filepath, url, duration });
 
-        const cacheEmbed = new EmbedBuilder()
-            .setTitle('✅ Song aus Cache geladen')
-            .setDescription(`[${title}](${url})`)
-            .addFields({ name: 'Dauer', value: String(duration), inline: true })
-            .setColor(0x00FF00);
-
-        await safeFollowUp(interaction, { embeds: [cacheEmbed] });
+        await safeFollowUp(interaction, { embeds: [ui.trackAddedEmbed({ title, url, duration, note: 'aus dem Cache — sofort verfügbar' })] });
         logger.info(`[CACHE HIT] ${title}`);
 
         // Fire-and-forget: the serialized chain may be busy with a long download —
@@ -136,14 +144,7 @@ async function handleSingleUrlPlay(context, url) {
     queue.songs.push(track);
 
     const downloadMessages = [];
-    const startMsg = await safeFollowUp(interaction, '⬇️ Download gestartet, ich informiere dich, wenn das Lied bereit ist.');
-    downloadMessages.push(startMsg);
-
-    let progressEmbed = new EmbedBuilder()
-        .setTitle('⬇️ Download läuft...')
-        .setDescription('0% abgeschlossen')
-        .setColor(0x1DB954);
-    let progressMsg = await safeFollowUp(interaction, { embeds: [progressEmbed] });
+    let progressMsg = await safeFollowUp(interaction, { embeds: [ui.downloadProgressEmbed({ title: video.title, percent: 0 })] });
     downloadMessages.push(progressMsg);
 
     const progressManager = new DownloadProgressManager();
@@ -151,10 +152,8 @@ async function handleSingleUrlPlay(context, url) {
         try {
             const parsed = progressManager.parseProgress(data);
             if (parsed && progressManager.shouldUpdate(parsed.percent)) {
-                const bar = progressManager.createProgressBar(parsed.percent);
-                const desc = `${bar} ${parsed.percent.toFixed(0)}%${parsed.speed ? ` (${parsed.speed})` : ''}${parsed.eta ? ` ETA: ${parsed.eta}` : ''}`;
-                progressEmbed.setDescription(desc);
-                if (progressMsg) progressMsg.edit({ embeds: [progressEmbed] }).catch(() => { });
+                const embed = ui.downloadProgressEmbed({ title: video.title, percent: parsed.percent, speed: parsed.speed, eta: parsed.eta });
+                if (progressMsg) progressMsg.edit({ embeds: [embed] }).catch(() => { });
             }
         } catch { }
     };
@@ -182,7 +181,7 @@ async function handleSingleUrlPlay(context, url) {
                 return;
             }
 
-            const finishMsg = await safeFollowUp(interaction, `✅ Download fertig: **${video.title}** — zur Queue hinzugefügt.`);
+            const finishMsg = await safeFollowUp(interaction, { embeds: [ui.trackAddedEmbed({ title: video.title, url, duration: video.duration, note: 'Download abgeschlossen' })] });
             downloadMessages.push(finishMsg);
             deleteDownloadMessages();
 
@@ -355,11 +354,9 @@ async function handlePlayCommand(context) {
         const [firstEntry, ...restEntries] = orderedEntries;
 
         // Progress message
-        const progressEmbed = new EmbedBuilder()
-            .setTitle(`⬇️ Playlist Download: ${playlistTitle}`)
-            .setDescription(`Bereite Download von ${restEntries.length} Songs vor...`)
-            .setColor(0x1DB954);
-        const progressMsg = await safeFollowUp(interaction, { embeds: [progressEmbed] });
+        const progressMsg = await safeFollowUp(interaction, {
+            embeds: [ui.playlistProgressEmbed({ playlistTitle, trackTitle: 'wird vorbereitet…', percent: 0, downloaded: 0, total: restEntries.length })]
+        });
         queue.playlistProgressMsg = progressMsg;
         queue.lastProgressUpdate = Date.now();
 
@@ -387,10 +384,12 @@ async function handlePlayCommand(context) {
             addedCount++;
         }
 
-        let msg = `➕ Playlist **${playlistTitle}** (${addedCount}/${restEntries.length} Einträge) zur Queue hinzugefügt.`;
-        if (addedCount < restEntries.length) msg += `\n⚠️ Queue-Limit erreicht (max. ${MAX_SONGS_PER_QUEUE}).`;
-        if (startIndex > 0) msg += `\n▶️ Starte bei Track #${startIndex + 1}.`;
-        await safeFollowUp(interaction, msg);
+        await safeFollowUp(interaction, {
+            embeds: [ui.playlistAddedEmbed({
+                playlistTitle, added: addedCount, total: restEntries.length, startIndex,
+                limitReached: addedCount < restEntries.length, maxSongs: MAX_SONGS_PER_QUEUE
+            })]
+        });
 
         // Kick playback even if the first track's info/download failed — otherwise
         // the freshly filled queue would sit silent until the next command.
@@ -420,13 +419,7 @@ async function handlePlayCommand(context) {
             return await safeFollowUp(interaction, '❌ Keine Ergebnisse gefunden.');
         }
 
-        let resultText = '🎵 **Suchergebnisse:**\n\n';
-        searchResults.forEach(r => {
-            resultText += `**${r.index}.** ${r.title}\n   👤 ${r.uploader} | ⏱️ ${r.duration}\n\n`;
-        });
-        resultText += '💡 Verwende `/select <nummer>` um ein Lied auszuwählen (z.B. `/select 1`)';
-
-        const searchMessage = await safeFollowUp(interaction, truncateMessage(resultText, 1900));
+        const searchMessage = await safeFollowUp(interaction, ui.searchResultsMessage(searchResults, interaction.user.id));
 
         searchCache.set(interaction.user.id, {
             results: searchResults,
@@ -499,7 +492,51 @@ async function handleSelectCommand(context) {
         throw err;
     }
 
-    await safeFollowUp(interaction, `🎵 Spiele: **${selectedResult.title}**`);
+    await safeFollowUp(interaction, `🎵 Spiele: **${ui.mdEscape(selectedResult.title)}**`);
+
+    try {
+        await ensureQueueAndJoin(context);
+    } catch (e) {
+        return await safeFollowUp(interaction, `❌ ${e.message}`);
+    }
+
+    return await handleSingleUrlPlay(context, selectedResult.url);
+}
+
+/**
+ * Select menu on the search results message: pick and play a result directly
+ */
+async function handleSearchSelect(context) {
+    const { interaction, searchCache } = context;
+    const ownerId = interaction.customId.split('|')[1];
+
+    if (interaction.user.id !== ownerId) {
+        return interaction.reply({ content: '❌ Das ist nicht deine Suche — starte selbst eine mit `/play`.', ephemeral: true });
+    }
+
+    // Reject picks from an outdated search message (a newer search replaced it)
+    const cached = searchCache.get(ownerId);
+    if (!cached || (cached.messageId && interaction.message?.id !== cached.messageId)) {
+        return interaction.reply({ content: '❌ Diese Suche ist abgelaufen. Starte eine neue mit `/play <suchbegriff>`.', ephemeral: true });
+    }
+
+    const number = parseInt(interaction.values[0], 10);
+    const selectedResult = cached.results[number - 1];
+    if (!selectedResult) {
+        return interaction.reply({ content: '❌ Ungültige Auswahl.', ephemeral: true });
+    }
+
+    searchCache.delete(ownerId);
+
+    // Turn the search message into the confirmation. This acknowledges the
+    // interaction AND sets interaction.replied, so later safeFollowUp calls go
+    // to the channel (a deferUpdate here would route them into editReply on
+    // this message instead — and lose them if it were deleted).
+    await interaction.update({
+        content: `🎵 Spiele: **${ui.mdEscape(selectedResult.title)}**`,
+        embeds: [],
+        components: []
+    }).catch(() => { });
 
     try {
         await ensureQueueAndJoin(context);
@@ -520,6 +557,7 @@ async function handlePauseCommand(context) {
     if (!queue) return interaction.reply({ content: '❌ Keine aktive Wiedergabe.', ephemeral: true });
 
     queue.player.pause();
+    refreshNowPlayingCard(interaction.guildId, queue);
     await interaction.reply({ content: '⏸️ Pausiert', ephemeral: true });
 }
 
@@ -533,6 +571,7 @@ async function handleResumeCommand(context) {
     if (!queue) return interaction.reply({ content: '❌ Keine aktive Wiedergabe.', ephemeral: true });
 
     queue.player.unpause();
+    refreshNowPlayingCard(interaction.guildId, queue);
     await interaction.reply({ content: '▶️ Fortgesetzt', ephemeral: true });
 }
 
@@ -585,25 +624,7 @@ async function handleQueueCommand(context) {
         return interaction.reply({ content: '📋 Queue ist leer.', ephemeral: true });
     }
 
-    let message = '';
-
-    // Show currently playing track
-    if (queue.currentTrack) {
-        const ct = queue.currentTrack;
-        const dur = ct.duration ? (typeof ct.duration === 'number' ? formatDuration(ct.duration) : ct.duration) : '';
-        message += `🎶 **Aktuell:** ${ct.title || 'Unbekannt'}${dur ? ` (${dur})` : ''}\n\n`;
-    }
-
-    if (queue.songs.length > 0) {
-        const lines = queue.songs.slice(0, 15).map((s, i) =>
-            `**${i + 1}.** ${s.title || 'Unbekannt'}${s.duration ? ` (${typeof s.duration === 'number' ? formatDuration(s.duration) : s.duration})` : ''}${s.playlistTitle ? ` — ${s.playlistTitle}` : ''}`
-        );
-        message += `📋 **Queue (${queue.songs.length} Songs)**\n\n${lines.join('\n')}${queue.songs.length > 15 ? '\n... und mehr' : ''}`;
-    } else {
-        message += '📋 Queue ist leer — nur der aktuelle Song läuft.';
-    }
-
-    await interaction.reply(truncateMessage(message, 1900));
+    await interaction.reply({ embeds: [ui.queueEmbed(queue)] });
 }
 
 /**
@@ -627,7 +648,8 @@ async function handleVolumeCommand(context) {
         }
     } catch { }
 
-    await interaction.reply({ content: `🔊 Lautstärke auf ${clampedValue}% gesetzt`, ephemeral: true });
+    refreshNowPlayingCard(interaction.guildId, queue);
+    await interaction.reply({ content: `🔊 Lautstärke auf ${clampedValue} % gesetzt`, ephemeral: true });
 }
 
 /**
@@ -659,6 +681,7 @@ async function handleShuffleCommand(context) {
     queue.shuffle = !queue.shuffle;
     queue._nextPrepared = false; // re-pick the next track under the new mode
 
+    refreshNowPlayingCard(interaction.guildId, queue);
     await interaction.reply({ content: `🔀 Shuffle ${queue.shuffle ? 'aktiviert' : 'deaktiviert'}`, ephemeral: true });
 }
 
@@ -698,22 +721,13 @@ async function handleTestCommand(context) {
 async function handleDebugCommand(context) {
     const { interaction, audioCache, guildQueues, backgroundDownloader, rateLimiter } = context;
 
-    const cacheStats = audioCache.getStats();
-    const queueCount = guildQueues.size;
-    const memberVoice = interaction.member?.voice?.channel;
-
-    const embed = new EmbedBuilder()
-        .setTitle('🔧 Debug-Informationen')
-        .setColor(0x00ff00)
-        .addFields(
-            { name: 'Bot Status', value: '✅ Online', inline: true },
-            { name: 'Guild ID', value: interaction.guildId || 'Unbekannt', inline: true },
-            { name: 'Voice Channel', value: memberVoice ? `${memberVoice.name} (${memberVoice.id})` : 'Nicht verbunden', inline: false },
-            { name: 'Cache', value: `${cacheStats.size}/${cacheStats.maxEntries} (${cacheStats.utilizationPercent}%)`, inline: true },
-            { name: 'Active Queues', value: String(queueCount), inline: true },
-            { name: 'BG Downloads', value: `Queue: ${backgroundDownloader.getStats().queueLength}, Active: ${backgroundDownloader.getStats().isActive}`, inline: true }
-        )
-        .setTimestamp();
+    const embed = ui.debugEmbed({
+        guildId: interaction.guildId,
+        voiceChannel: interaction.member?.voice?.channel,
+        cacheStats: audioCache.getStats(),
+        queueCount: guildQueues.size,
+        bgStats: backgroundDownloader.getStats()
+    });
 
     await interaction.reply({ embeds: [embed], ephemeral: true });
 }
@@ -919,8 +933,9 @@ async function handleRepeatSingleCommand(context) {
     if (!queue) return interaction.reply({ content: '❌ Keine Queue vorhanden.', ephemeral: true });
 
     queue.loopMode = queue.loopMode === 'song' ? 'off' : 'song';
+    refreshNowPlayingCard(interaction.guildId, queue);
     const emoji = queue.loopMode === 'song' ? '🔂' : '➡️';
-    await interaction.reply({ content: `${emoji} Loop Single: ${queue.loopMode === 'song' ? 'An' : 'Aus'}`, ephemeral: true });
+    await interaction.reply({ content: `${emoji} Song-Loop: ${queue.loopMode === 'song' ? 'an' : 'aus'}`, ephemeral: true });
 }
 
 /**
@@ -933,8 +948,9 @@ async function handleRepeatCommand(context) {
     if (!queue) return interaction.reply({ content: '❌ Keine Queue vorhanden.', ephemeral: true });
 
     queue.loopMode = queue.loopMode === 'queue' ? 'off' : 'queue';
+    refreshNowPlayingCard(interaction.guildId, queue);
     const emoji = queue.loopMode === 'queue' ? '🔁' : '➡️';
-    await interaction.reply({ content: `${emoji} Loop Queue: ${queue.loopMode === 'queue' ? 'An' : 'Aus'}`, ephemeral: true });
+    await interaction.reply({ content: `${emoji} Queue-Loop: ${queue.loopMode === 'queue' ? 'an' : 'aus'}`, ephemeral: true });
 }
 
 /**
@@ -1024,11 +1040,9 @@ async function handlePlaylistChoiceButton(context) {
             const orderedEntries = [...entries.slice(startIndex), ...entries.slice(0, startIndex)];
             const [firstEntry, ...restEntries] = orderedEntries;
 
-            const progressEmbed = new EmbedBuilder()
-                .setTitle(`⬇️ Playlist Download: ${playlistTitle}`)
-                .setDescription(`Bereite Download von ${restEntries.length} Songs vor...`)
-                .setColor(0x1DB954);
-            const progressMsg = await safeFollowUp(interaction, { embeds: [progressEmbed] });
+            const progressMsg = await safeFollowUp(interaction, {
+                embeds: [ui.playlistProgressEmbed({ playlistTitle, trackTitle: 'wird vorbereitet…', percent: 0, downloaded: 0, total: restEntries.length })]
+            });
             queue.playlistProgressMsg = progressMsg;
             queue.lastProgressUpdate = Date.now();
 
@@ -1055,10 +1069,12 @@ async function handlePlaylistChoiceButton(context) {
             }
             backgroundDownloader.processQueue();
 
-            let msg = `➕ Playlist **${playlistTitle}** (${addedCount}/${restEntries.length} Einträge) zur Queue hinzugefügt.`;
-            if (addedCount < restEntries.length) msg += `\n⚠️ Queue-Limit erreicht (max. ${MAX_SONGS_PER_QUEUE}).`;
-            if (startIndex > 0) msg += `\n▶️ Starte bei Track #${startIndex + 1}.`;
-            await safeFollowUp(interaction, msg);
+            await safeFollowUp(interaction, {
+                embeds: [ui.playlistAddedEmbed({
+                    playlistTitle, added: addedCount, total: restEntries.length, startIndex,
+                    limitReached: addedCount < restEntries.length, maxSongs: MAX_SONGS_PER_QUEUE
+                })]
+            });
 
             // Kick playback even if the first track's info/download failed
             ensureNextTrackDownloadedAndPlay(interaction.guildId, context.audioCache);
@@ -1091,7 +1107,8 @@ async function handleNowPlayingButton(context) {
         case 'np_pause': {
             if (queue.player.state.status === AudioPlayerStatus.Playing) {
                 queue.player.pause();
-            } else if (queue.player.state.status === AudioPlayerStatus.Paused) {
+            } else {
+                // Covers Paused AND AutoPaused (no-op when Idle)
                 queue.player.unpause();
             }
             break;
@@ -1143,6 +1160,11 @@ async function handleNowPlayingButton(context) {
             queue._nextPrepared = false; // re-pick the next track under the new mode
             break;
         }
+        case 'np_loop': {
+            // Cycle: off -> song -> queue -> off
+            queue.loopMode = queue.loopMode === 'off' ? 'song' : queue.loopMode === 'song' ? 'queue' : 'off';
+            break;
+        }
         case 'np_savequeue': {
             // Collect all tracks: current + queued
             const allTracks = [];
@@ -1185,48 +1207,19 @@ async function handleNowPlayingButton(context) {
             return;
     }
 
-    // Rebuild and update the embed in-place
+    // Rebuild and update the card in-place
     try {
         const track = queue.currentTrack;
         if (!track) return interaction.deferUpdate();
 
-        const volPercent = queue.volume || 50;
-        const volBar = '█'.repeat(Math.round(volPercent / 10)) + '░'.repeat(10 - Math.round(volPercent / 10));
-        const queuePos = queue.songs.length > 0 ? `${queue.songs.length} Song${queue.songs.length > 1 ? 's' : ''} in Queue` : 'Queue leer';
-        const isPaused = queue.player.state.status === AudioPlayerStatus.Paused;
-        const title = track.title || 'Unknown';
-        const description = track.url ? `**[${title}](${track.url})**` : `**${title}**`;
-
-        const embed = new EmbedBuilder()
-            .setTitle(isPaused ? '⏸️ Paused' : '🎶 Now Playing')
-            .setDescription(description)
-            .addFields(
-                { name: '⏱️ Dauer', value: String(track.duration || 'unbekannt'), inline: true },
-                { name: '👤 Angefragt von', value: `<@${track.requesterId}>`, inline: true },
-                { name: '🔊 Lautstärke', value: `\`${volBar}\` ${volPercent}%`, inline: true }
-            )
-            .setColor(isPaused ? 0xFFA500 : 0x1DB954)
-            .setTimestamp();
-
-        if (track.playlistTitle) {
-            embed.addFields({ name: '📋 Playlist', value: String(track.playlistTitle), inline: true });
+        // Messages from before the Components-V2 switch can't be edited into the
+        // new card format — just acknowledge; the next track brings the new card.
+        if (!interaction.message?.flags?.has(DjsMessageFlags.IsComponentsV2)) {
+            return interaction.deferUpdate();
         }
-        embed.setFooter({ text: `🎵 ${queuePos} • ${queue.loopMode !== 'off' ? (queue.loopMode === 'song' ? '🔂 Repeat Song' : '🔁 Repeat Queue') : '➡️ Normal'}` });
 
-        // ActionRowBuilder, ButtonBuilder, ButtonStyle already imported at top of file
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`np_prev|${guildId}`).setEmoji('⏮️').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId(`np_pause|${guildId}`).setEmoji(isPaused ? '▶️' : '⏸️').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId(`np_skip|${guildId}`).setEmoji('⏭️').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId(`np_voldn|${guildId}`).setEmoji('🔉').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId(`np_volup|${guildId}`).setEmoji('🔊').setStyle(ButtonStyle.Secondary)
-        );
-        const row2 = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`np_shuffle|${guildId}`).setLabel('Shuffle').setEmoji('🔀').setStyle(queue.shuffle ? ButtonStyle.Success : ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId(`np_savequeue|${guildId}`).setLabel('Queue speichern').setEmoji('💾').setStyle(ButtonStyle.Success)
-        );
-
-        await interaction.update({ embeds: [embed], components: [row, row2] });
+        const card = ui.buildNowPlayingCard(guildId, queue, track);
+        await interaction.update({ components: [card] });
     } catch (e) {
         logger.warn(`[NP BUTTON] ${e.message}`);
         // Give user feedback instead of failing silently
@@ -1241,6 +1234,7 @@ async function handleNowPlayingButton(context) {
 module.exports = {
     handlePlayCommand,
     handleSelectCommand,
+    handleSearchSelect,
     handlePauseCommand,
     handleResumeCommand,
     handleSkipCommand,
