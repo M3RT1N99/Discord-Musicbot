@@ -97,6 +97,7 @@ const client = new Client({
 
 // --------------------------- Client Ready Event ---------------------------
 client.once("clientReady", async () => {
+    logger.setClient(client);
     logger.info(`✅ Logged in as ${client.user.tag}`);
     logger.info(`📊 Connected to ${client.guilds.cache.size} guilds`);
 
@@ -113,9 +114,9 @@ client.once("clientReady", async () => {
         for (const [guildId] of guilds) {
             try {
                 await rest.put(Routes.applicationGuildCommands(client.application.id, guildId), { body: commandsJson });
-                logger.info(`[COMMANDS] Registered for guild ${guildId}`);
+                logger.info(`[COMMANDS] Registered for guild ${logger.guildTag(guildId)}`);
             } catch (guildErr) {
-                logger.warn(`[COMMANDS] Failed for guild ${guildId}: ${guildErr?.message}`);
+                logger.warn(`[COMMANDS] Failed for guild ${logger.guildTag(guildId)}: ${guildErr?.message}`);
             }
         }
 
@@ -135,7 +136,7 @@ client.once("clientReady", async () => {
             for (const [guildId, q] of [...guildQueues]) {
                 if (q.player.state.status === 'playing') {
                     const buffering = q.currentFfmpeg ? 'Buffering' : 'Ready';
-                    logger.debug(`[STATUS][${guildId}] Playing: ${q.currentTrack?.title?.substring(0, 30)}... | State: ${buffering}`);
+                    logger.debug(`[STATUS][${logger.guildTag(guildId)}] Playing: ${q.currentTrack?.title?.substring(0, 30)}... | State: ${buffering}`);
                 }
             }
         }, 30000).unref();
@@ -153,9 +154,9 @@ client.on("guildCreate", async (guild) => {
 
     try {
         await rest.put(Routes.applicationGuildCommands(client.application.id, guild.id), { body: commandsJson });
-        logger.info(`[COMMANDS] Registered for new guild ${guild.id}`);
+        logger.info(`[COMMANDS] Registered for new guild ${guild.id} (${guild.name})`);
     } catch (err) {
-        logger.warn(`[COMMANDS] Failed for new guild ${guild.id}: ${err?.message}`);
+        logger.warn(`[COMMANDS] Failed for new guild ${guild.id} (${guild.name}): ${err?.message}`);
     }
 });
 
@@ -173,7 +174,7 @@ client.on("voiceStateUpdate", (oldState, newState) => {
     // Count non-bot members still in the channel
     const humanMembers = oldState.channel.members.filter(m => !m.user.bot).size;
     if (humanMembers === 0) {
-        logger.info(`[AUTO-LEAVE][${oldState.guild.id}] All users left voice channel, cleaning up`);
+        logger.info(`[AUTO-LEAVE][${oldState.guild.id} (${oldState.guild.name})] All users left voice channel, cleaning up`);
         deleteGuildQueue(oldState.guild.id);
     }
 });

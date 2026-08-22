@@ -49,5 +49,18 @@ const logger = winston.createLogger({
     ]
 });
 
+// Guild name lookup for log tags. The Discord client is registered once at
+// startup; before that (or for unknown guilds) tags fall back to the bare ID.
+let discordClient = null;
+
+logger.setClient = (client) => {
+    discordClient = client;
+};
+
+logger.guildTag = (guildId) => {
+    const name = discordClient?.guilds?.cache?.get(guildId)?.name;
+    return name ? `${guildId} (${name})` : `${guildId}`;
+};
+
 // Export logger
 module.exports = logger;

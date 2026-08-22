@@ -155,7 +155,7 @@ async function handleSingleUrlPlay(context, url) {
             const currentQueue = guildQueues.get(guildId);
             audioCache.set(url, filepath, { title: video.title, duration: video.duration });
             if (!currentQueue) {
-                logger.warn(`[DOWNLOAD] Queue gone for guild ${guildId}, discarding downloaded track`);
+                logger.warn(`[DOWNLOAD] Queue gone for guild ${logger.guildTag(guildId)}, discarding downloaded track`);
                 return;
             }
             currentQueue.songs.push({ requesterId: interaction.user.id, title: video.title, filepath, url, duration: video.duration });

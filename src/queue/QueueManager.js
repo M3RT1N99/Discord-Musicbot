@@ -23,19 +23,19 @@ const guildQueues = new Map();
 function createPlayerForGuild(guildId, connection) {
     const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
 
-    player.on("error", err => logger.error(`[PLAYER ERROR][${guildId}] ${err?.message || err}`));
+    player.on("error", err => logger.error(`[PLAYER ERROR][${logger.guildTag(guildId)}] ${err?.message || err}`));
 
     // Voice disconnect cleanup — prevent orphaned queues and FFmpeg processes
     // Use a timeout to allow for temporary disconnects (region switches, brief network issues)
     let disconnectTimer = null;
     connection.on(VoiceConnectionStatus.Disconnected, () => {
-        logger.warn(`[VOICE DISCONNECT][${guildId}] Connection lost, waiting 15s for reconnect...`);
+        logger.warn(`[VOICE DISCONNECT][${logger.guildTag(guildId)}] Connection lost, waiting 15s for reconnect...`);
         if (disconnectTimer) clearTimeout(disconnectTimer);
         disconnectTimer = setTimeout(() => {
             // Only cleanup if still disconnected (not reconnected)
             if (connection.state.status === VoiceConnectionStatus.Disconnected ||
                 connection.state.status === VoiceConnectionStatus.Destroyed) {
-                logger.warn(`[VOICE DISCONNECT][${guildId}] No reconnect after 15s, cleaning up`);
+                logger.warn(`[VOICE DISCONNECT][${logger.guildTag(guildId)}] No reconnect after 15s, cleaning up`);
                 cleanupGuildResources(guildId);
             }
         }, 15000);
@@ -45,12 +45,12 @@ function createPlayerForGuild(guildId, connection) {
         if (disconnectTimer) {
             clearTimeout(disconnectTimer);
             disconnectTimer = null;
-            logger.info(`[VOICE RECONNECT][${guildId}] Connection restored`);
+            logger.info(`[VOICE RECONNECT][${logger.guildTag(guildId)}] Connection restored`);
         }
     });
     connection.on(VoiceConnectionStatus.Destroyed, () => {
         if (disconnectTimer) clearTimeout(disconnectTimer);
-        logger.info(`[VOICE DESTROYED][${guildId}] Connection destroyed, cleaning up`);
+        logger.info(`[VOICE DESTROYED][${logger.guildTag(guildId)}] Connection destroyed, cleaning up`);
         cleanupGuildResources(guildId);
     });
 
@@ -99,7 +99,7 @@ function createPlayerForGuild(guildId, connection) {
  */
 async function ensureNextTrackDownloadedAndPlay(guildId, audioCache, _depth = 0) {
     if (_depth > 10) {
-        logger.warn(`[RECURSION LIMIT][${guildId}] ensureNextTrackDownloadedAndPlay exceeded max depth, stopping`);
+        logger.warn(`[RECURSION LIMIT][${logger.guildTag(guildId)}] ensureNextTrackDownloadedAndPlay exceeded max depth, stopping`);
         return;
     }
     const q = guildQueues.get(guildId);
@@ -408,7 +408,7 @@ function renderNowPlaying(guildId, track) {
         }
     }
 
-    logger.info(`[PLAY][${guildId}] Playing: ${track.title || track.filepath}`);
+    logger.info(`[PLAY][${logger.guildTag(guildId)}] Playing: ${track.title || track.filepath}`);
 }
 
 /**
@@ -492,7 +492,7 @@ function cleanupGuildResources(guildId) {
     queue.playlistProgressMsg = null;
 
     guildQueues.delete(guildId);
-    logger.info(`[CLEANUP][${guildId}] Guild resources cleaned up`);
+    logger.info(`[CLEANUP][${logger.guildTag(guildId)}] Guild resources cleaned up`);
 }
 
 /**
