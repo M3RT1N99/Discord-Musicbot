@@ -2,7 +2,7 @@
 // yt-dlp wrapper functions
 
 const { spawn } = require('child_process');
-const { YTDLP_BIN, DOWNLOAD_TIMEOUT_MS, SEARCH_TIMEOUT_MS, DOWNLOAD_DIR } = require('../config/constants');
+const { YTDLP_BIN, YTDLP_PLUGIN_DIR, DOWNLOAD_TIMEOUT_MS, SEARCH_TIMEOUT_MS, DOWNLOAD_DIR } = require('../config/constants');
 const { isValidMediaUrl, validateSearchQuery, sanitizeString } = require('../utils/validation');
 const { isYouTubePlaylistUrl, cleanPlaylistUrl } = require('../utils/urlCleaner');
 const { formatDuration } = require('../utils/formatting');
@@ -10,11 +10,16 @@ const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
 
+// Trusted args for every yt-dlp call. Added after the arg filter in
+// spawnYtdlp, so a filtered-out path can never leave a dangling flag.
+const BASE_YTDLP_ARGS = ['--plugin-dirs', YTDLP_PLUGIN_DIR];
+
 function buildLowPriorityCommand(binary, args) {
+    const fullArgs = [...BASE_YTDLP_ARGS, ...args];
     if (process.platform === 'win32') {
-        return { command: binary, args };
+        return { command: binary, args: fullArgs };
     }
-    return { command: 'nice', args: ['-n', '19', binary, ...args] };
+    return { command: 'nice', args: ['-n', '19', binary, ...fullArgs] };
 }
 
 function createProcessError(message, stdout = '', stderr = '', code = null) {

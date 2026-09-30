@@ -1,9 +1,13 @@
 // src/config/constants.js
 // Central configuration for Discord Musicbot
 
+const path = require("path");
+
 // --------------------------- Environment Configuration ---------------------------
 const TOKEN = process.env.TOKEN;
 const YTDLP_BIN = process.env.YTDLP_PATH || "/opt/venv/bin/yt-dlp";
+// Bundled yt-dlp plugins (e.g. the fixed Audiomack extractor), see ytdlp-plugins/
+const YTDLP_PLUGIN_DIR = path.resolve(process.env.YTDLP_PLUGIN_DIR || path.join(__dirname, "..", "..", "ytdlp-plugins"));
 const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || "/tmp/musicbot_downloads";
 const MAPPING_DIR = process.env.MAPPING_DIR || "/mapping/christ";
 const MAX_CACHE = parseInt(process.env.MAX_CACHE || "200", 10);
@@ -69,6 +73,7 @@ module.exports = {
     // Environment
     TOKEN,
     YTDLP_BIN,
+    YTDLP_PLUGIN_DIR,
     DOWNLOAD_DIR,
     MAPPING_DIR,
     MAX_CACHE,

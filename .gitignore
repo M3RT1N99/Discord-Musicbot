@@ -73,3 +73,5 @@ Thumbs.db
 
 # Docker
 .dockerignore
+# Python bytecode (yt-dlp plugins)
+__pycache__/
