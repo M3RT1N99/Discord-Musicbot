@@ -116,39 +116,6 @@ function spawnYtdlpSearch(args, opts = {}) {
 }
 
 /**
- * Gets info JSON for URL or search query
- * @param {string} urlOrQuery - URL or ytsearch1: query
- * @returns {Promise<object>} Video/playlist info
- */
-async function getYtdlpInfo(urlOrQuery) {
-    // Validate input
-    if (typeof urlOrQuery !== 'string') {
-        throw new Error('Invalid input: must be string');
-    }
-
-    // For URLs: strict validation
-    if (urlOrQuery.startsWith('http')) {
-        if (!isValidMediaUrl(urlOrQuery)) {
-            throw new Error('Invalid or unsafe URL');
-        }
-    }
-    // For search queries: validate ytsearch1: prefix
-    else if (urlOrQuery.startsWith('ytsearch1:')) {
-        const query = urlOrQuery.substring(10);
-        if (!validateSearchQuery(query)) {
-            throw new Error('Invalid search query');
-        }
-    }
-    else {
-        throw new Error('Input must be valid URL or ytsearch1: query');
-    }
-
-    const args = ["-J", "--no-warnings", "--ignore-errors", "--socket-timeout", "60", urlOrQuery];
-    const { stdout } = await spawnYtdlp(args);
-    return JSON.parse(stdout);
-}
-
-/**
  * Gets playlist entries with metadata
  * @param {string} playlistUrl - Playlist URL
  * @returns {Promise<object>} { playlistTitle, entries }
@@ -439,7 +406,6 @@ function downloadSingleTo(filepath, urlOrId, progressCb) {
 module.exports = {
     spawnYtdlp,
     spawnYtdlpSearch,
-    getYtdlpInfo,
     getPlaylistEntries,
     getVideoInfo,
     searchVideos,

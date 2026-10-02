@@ -7,9 +7,8 @@ const { MessageFlags } = require('discord.js');
 const { buildNowPlayingCard, downloadProgressEmbed } = require('../ui/messages');
 const path = require('path');
 const fs = require('fs');
-const { randomUUID } = require('crypto');
-const { DOWNLOAD_DIR, MAX_SONGS_PER_QUEUE } = require('../config/constants');
 const { downloadSingleTo } = require('../download/ytdlp');
+const { newDownloadPath } = require('../download/downloadPaths');
 const logger = require('../utils/logger');
 
 // Global guild queues map
@@ -203,8 +202,7 @@ async function _ensureNext(guildId, audioCache, depth) {
     }
 
     // Build filepath
-    const filename = `song_${Date.now()}_${randomUUID().slice(0, 8)}.opus`;
-    const filepath = path.join(DOWNLOAD_DIR, filename);
+    const filepath = newDownloadPath();
 
     // Notify channel (no progress source here — the embed shows "wird geladen…")
     if (q.lastInteractionChannel) {
@@ -453,15 +451,6 @@ function renderNowPlaying(guildId, track) {
 }
 
 /**
- * Gets guild queue or creates new one
- * @param {string} guildId - Guild ID
- * @returns {object|null} Guild queue
- */
-function getGuildQueue(guildId) {
-    return guildQueues.get(guildId) || null;
-}
-
-/**
  * Creates a new guild queue
  * @param {string} guildId - Guild ID
  * @param {VoiceConnection} connection - Voice connection
@@ -601,7 +590,6 @@ module.exports = {
     createPlayerForGuild,
     ensureNextTrackDownloadedAndPlay,
     playNextInGuild,
-    getGuildQueue,
     createGuildQueue,
     deleteGuildQueue,
     cleanupGuildResources,

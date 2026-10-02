@@ -86,20 +86,6 @@ async function joinVoiceChannelWithRetry(voiceChannel, retries = JOIN_RETRIES) {
     throw lastErr || new Error("Failed to join voice channel");
 }
 
-/**
- * Leaves voice channel and cleans up
- * @param {VoiceConnection} connection - Voice connection to destroy
- */
-function leaveVoiceChannel(connection) {
-    try {
-        connection.destroy();
-        logger.info("[VOICE] Left voice channel");
-    } catch (e) {
-        logger.error(`[VOICE] Error leaving channel: ${e?.message || e}`);
-    }
-}
-
 module.exports = {
-    joinVoiceChannelWithRetry,
-    leaveVoiceChannel
+    joinVoiceChannelWithRetry
 };

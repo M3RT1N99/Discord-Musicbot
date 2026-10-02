@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { MAX_CACHE } = require('../config/constants');
+const { DOWNLOAD_FILE_PATTERN } = require('../download/downloadPaths');
 const logger = require('../utils/logger');
 
 /**
@@ -86,9 +87,6 @@ class AudioCache {
      */
     async reconcileOrphans() {
         const ORPHAN_MIN_AGE_MS = 60 * 60 * 1000; // 1 hour
-        // Only ever touch the bot's own download files — the download dir is a
-        // host bind mount and may contain unrelated user files.
-        const OWN_FILE_PATTERN = /^song_\d+_[0-9a-f]{8}\./i;
         if (this.loadFailed) {
             logger.warn('[CACHE] Skipping orphan cleanup: index failed to load');
             return;
@@ -104,7 +102,9 @@ class AudioCache {
             const now = Date.now();
             let deleted = 0;
             for (const name of names) {
-                if (!OWN_FILE_PATTERN.test(name)) continue;
+                // Only ever touch the bot's own download files — the download dir is a
+                // host bind mount and may contain unrelated user files.
+                if (!DOWNLOAD_FILE_PATTERN.test(name)) continue;
                 const full = path.resolve(this.downloadDir, name);
                 if (full === indexPath) continue; // Never delete the index itself
                 if (referenced.has(full)) continue;

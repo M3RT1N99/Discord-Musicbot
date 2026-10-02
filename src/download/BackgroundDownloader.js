@@ -1,9 +1,8 @@
 // src/download/BackgroundDownloader.js
 // Background download queue processor for playlist tracks
 
-const path = require('path');
-const { randomUUID } = require('crypto');
-const { DOWNLOAD_DIR, MAX_DOWNLOAD_QUEUE } = require('../config/constants');
+const { MAX_DOWNLOAD_QUEUE } = require('../config/constants');
+const { newDownloadPath } = require('./downloadPaths');
 const { playlistProgressEmbed } = require('../ui/messages');
 const { downloadSingleTo, getVideoInfo } = require('./ytdlp');
 const DownloadProgressManager = require('./ProgressManager');
@@ -70,9 +69,7 @@ class BackgroundDownloader {
 
 
             try {
-                // Generate filename
-                const tempFilename = `song_${Date.now()}_${randomUUID().slice(0, 8)}.opus`;
-                const filepath = path.join(DOWNLOAD_DIR, tempFilename);
+                const filepath = newDownloadPath();
 
                 // Download with progress. Contract with QueueManager lazy download:
                 // the running download is exposed as track._dlPromise; on success

@@ -79,21 +79,40 @@ yt-dlp is automatically updated on every container start and checked every 6 hou
 
 ```
 src/
-├── index.js                 # Entry point, slash commands, events
+├── index.js                 # Entry point: services, gateway events, interaction routing
 ├── commands/
-│   └── commandHandlers.js   # All command handlers
+│   ├── commandHandlers.js   # Barrel: all interaction handlers index.js routes to
+│   ├── definitions.js       # Slash command definitions
+│   ├── registration.js      # Guild-scoped command registration (REST)
+│   ├── play.js              # /play, /select, search result picker
+│   ├── playlistChoice.js    # "Song or playlist?" buttons
+│   ├── pendingChoices.js    # Pending song/playlist choices
+│   ├── playlistIntake.js    # Playlist → queue (first track now, rest in background)
+│   ├── singleTrack.js       # Single URL → queue (cache hit or download)
+│   ├── queueSession.js      # Join voice + create the guild queue
+│   ├── playback.js          # pause/resume/skip/stop/queue/volume/leave/shuffle/repeat
+│   ├── nowPlayingButtons.js # Now Playing card buttons
+│   ├── library.js           # /playcache, /playchrist
+│   └── maintenance.js       # /test, /debug, /refresh, /clearcache
 ├── queue/
-│   └── QueueManager.js      # Queue & playback (ffmpeg PCM buffering)
+│   ├── QueueManager.js      # Queue & playback engine (ffmpeg PCM buffering)
+│   └── queueOps.js          # Small queue helpers (limit count, volume, shuffle)
 ├── download/
-│   ├── ytdlp.js             # yt-dlp wrapper
+│   ├── ytdlp.js             # yt-dlp wrapper (+ bundled plugins via --plugin-dirs)
+│   ├── downloadPaths.js     # Download file naming contract
 │   ├── BackgroundDownloader.js
 │   ├── ProgressManager.js
 │   └── RateLimiter.js
 ├── cache/
 │   ├── AudioCache.js        # LRU file cache
 │   └── SearchCache.js
+├── ui/
+│   └── messages.js          # All embeds, cards and components
 ├── voice/
 │   └── VoiceManager.js      # Voice join with retry
+├── runtime/
+│   ├── statusFiles.js       # Heartbeat/active-queue files for healthcheck + updater
+│   └── shutdown.js          # Graceful SIGTERM/SIGINT shutdown
 ├── utils/
 │   ├── validation.js        # URL/input security
 │   ├── urlCleaner.js         # YouTube URL parsing
@@ -101,6 +120,8 @@ src/
 │   └── logger.js             # Winston logger
 └── config/
     └── constants.js          # All configuration values
+ytdlp-plugins/                # yt-dlp plugins (fixed Audiomack extractor)
+test/                         # node:test suites (npm test), run fully offline
 ```
 
 ## Security

@@ -131,37 +131,11 @@ function isValidMediaUrl(urlString) {
     return validateUrl(urlString);
 }
 
-/**
- * YouTube-specific URL validation
- * @param {string} urlString - URL to validate
- * @returns {boolean} True if valid YouTube URL
- */
-function isValidYouTubeUrl(urlString) {
-    if (!validateUrl(urlString)) return false;
-
-    try {
-        const url = new URL(urlString);
-        const hostname = url.hostname.toLowerCase();
-
-        // YouTube Video URL patterns
-        if (hostname.includes('youtube.com')) {
-            return url.searchParams.has('v') || url.pathname.includes('/watch');
-        }
-        if (hostname === 'youtu.be') {
-            return url.pathname.length > 1;
-        }
-        return false;
-    } catch {
-        return false;
-    }
-}
-
 module.exports = {
     sanitizeString,
     isInteractionValid,
     safeFollowUp,
     validateUrl,
     validateSearchQuery,
-    isValidMediaUrl,
-    isValidYouTubeUrl
+    isValidMediaUrl
 };

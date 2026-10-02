@@ -309,6 +309,53 @@ function searchResultsMessage(results, userId) {
 }
 
 /**
+ * Two-button row of the "song or playlist?" prompt
+ * @param {string} singleId - customId of the song button
+ * @param {string} singleLabel - Label of the song button
+ * @param {string} playlistId - customId of the playlist button
+ * @param {string} playlistLabel - Label of the playlist button
+ * @param {boolean} disabled - Render both buttons disabled
+ * @returns {ActionRowBuilder} Button row
+ */
+function choiceRow(singleId, singleLabel, playlistId, playlistLabel, disabled) {
+    const button = (id, label, style) => {
+        const b = new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style);
+        return disabled ? b.setDisabled(true) : b;
+    };
+    return new ActionRowBuilder().addComponents(
+        button(singleId, singleLabel, ButtonStyle.Primary),
+        button(playlistId, playlistLabel, ButtonStyle.Secondary)
+    );
+}
+
+/**
+ * Active "song or playlist?" buttons for a pending choice
+ * @param {string} choiceKey - Key of the pending choice
+ * @param {string} playlistLabel - '📋 Ganze Playlist' or the Auto-Mix label
+ * @returns {ActionRowBuilder} Button row
+ */
+function songOrPlaylistRow(choiceKey, playlistLabel) {
+    return choiceRow(`play_single|${choiceKey}`, '🎵 Nur dieses Lied', `play_playlist|${choiceKey}`, playlistLabel, false);
+}
+
+/**
+ * Disabled buttons after the choice timed out and the song was auto-picked
+ * @param {string} playlistLabel - Label the prompt showed
+ * @returns {ActionRowBuilder} Button row
+ */
+function songOrPlaylistExpiredRow(playlistLabel) {
+    return choiceRow('expired_single', '🎵 Nur dieses Lied (auto)', 'expired_playlist', playlistLabel, true);
+}
+
+/**
+ * Disabled buttons after the user made a choice
+ * @returns {ActionRowBuilder} Button row
+ */
+function songOrPlaylistDoneRow() {
+    return choiceRow('done_single', '🎵 Nur dieses Lied', 'done_playlist', '📋 Ganze Playlist', true);
+}
+
+/**
  * Debug info embed
  * @param {object} opts - Debug data
  * @returns {EmbedBuilder} Embed
@@ -341,5 +388,8 @@ module.exports = {
     playlistAddedEmbed,
     queueEmbed,
     searchResultsMessage,
+    songOrPlaylistRow,
+    songOrPlaylistExpiredRow,
+    songOrPlaylistDoneRow,
     debugEmbed
 };

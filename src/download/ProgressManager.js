@@ -1,6 +1,8 @@
 // src/download/ProgressManager.js
 // Download progress parsing and display
 
+const { PROGRESS_EDIT_INTERVAL_MS } = require('../config/constants');
+
 /**
  * Helper class for unified progress parsing and display
  */
@@ -8,7 +10,7 @@ class DownloadProgressManager {
     constructor() {
         this.lastPercent = 0;
         this.lastUpdate = 0;
-        this.UPDATE_INTERVAL = 2500;
+        this.UPDATE_INTERVAL = PROGRESS_EDIT_INTERVAL_MS;
     }
 
     /**
@@ -71,25 +73,6 @@ class DownloadProgressManager {
             return true;
         }
         return false;
-    }
-
-    /**
-     * Creates ASCII progress bar
-     * @param {number} percent - Progress percentage
-     * @returns {string} Progress bar string
-     */
-    createProgressBar(percent) {
-        const total = 10;
-        const progress = Math.round((Math.max(0, Math.min(100, percent)) / 100) * total);
-        return '▰'.repeat(progress) + '▱'.repeat(total - progress);
-    }
-
-    /**
-     * Resets progress state
-     */
-    reset() {
-        this.lastPercent = 0;
-        this.lastUpdate = 0;
     }
 }
 

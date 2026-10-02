@@ -1,0 +1,133 @@
+[
+  {
+    "options": [
+      {
+        "type": 3,
+        "name": "query",
+        "description": "YouTube-Link oder Suchbegriff",
+        "required": true
+      }
+    ],
+    "name": "play",
+    "description": "Spielt einen Song, Link oder Suchbegriff",
+    "type": 1
+  },
+  {
+    "options": [
+      {
+        "max_value": 10,
+        "min_value": 1,
+        "type": 4,
+        "name": "number",
+        "description": "Nummer des Liedes (1-10)",
+        "required": true
+      }
+    ],
+    "name": "select",
+    "description": "Wähle ein Lied aus den Suchergebnissen",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "pause",
+    "description": "Pausiert die Wiedergabe",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "resume",
+    "description": "Setzt die Wiedergabe fort",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "skip",
+    "description": "Überspringt den aktuellen Song",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "stop",
+    "description": "Stoppt die Wiedergabe und leert die Queue",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "queue",
+    "description": "Zeigt die aktuelle Queue an",
+    "type": 1
+  },
+  {
+    "options": [
+      {
+        "type": 4,
+        "name": "wert",
+        "description": "0-100",
+        "required": true
+      }
+    ],
+    "name": "volume",
+    "description": "Setzt die Lautstärke (0-100)",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "leave",
+    "description": "Bot verlässt den Sprachkanal",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "shuffle",
+    "description": "Schaltet Shuffle ein/aus",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "test",
+    "description": "Spielt test.mp3 im Container",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "debug",
+    "description": "Debug-Informationen anzeigen",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "playcache",
+    "description": "Spielt alle Lieder aus dem Cache ab",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "playchrist",
+    "description": "Spielt alle Audiodateien aus /mapping/christ ab",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "refresh",
+    "description": "Commands neu registrieren (Admin only)",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "clearcache",
+    "description": "Cache leeren (Admin only)",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "repeatsingle",
+    "description": "Wiederholt den aktuellen Song",
+    "type": 1
+  },
+  {
+    "options": [],
+    "name": "repeat",
+    "description": "Wiederholt die gesamte Queue",
+    "type": 1
+  }
+]
