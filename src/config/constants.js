@@ -9,7 +9,8 @@ const YTDLP_BIN = process.env.YTDLP_PATH || "/opt/venv/bin/yt-dlp";
 // Bundled yt-dlp plugins (e.g. the fixed Audiomack extractor), see ytdlp-plugins/
 const YTDLP_PLUGIN_DIR = path.resolve(process.env.YTDLP_PLUGIN_DIR || path.join(__dirname, "..", "..", "ytdlp-plugins"));
 const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || "/tmp/musicbot_downloads";
-const MAPPING_DIR = process.env.MAPPING_DIR || "/mapping/christ";
+// Local music library for /playlocalmusic (every subfolder is selectable)
+const LOCAL_MUSIC_DIR = process.env.LOCAL_MUSIC_DIR || "/music";
 const MAX_CACHE = parseInt(process.env.MAX_CACHE || "200", 10);
 const DOWNLOAD_TIMEOUT_MS = (parseInt(process.env.DOWNLOAD_TIMEOUT_SEC || "120", 10)) * 1000;
 const SEARCH_TIMEOUT_MS = (parseInt(process.env.SEARCH_TIMEOUT_SEC || "30", 10)) * 1000;
@@ -68,6 +69,7 @@ const SEARCH_CACHE_TIMEOUT = 1 * 60 * 1000; // 1 Minute
 
 // --------------------------- Local Audio Configuration ---------------------------
 const LOCAL_AUDIO_EXTENSIONS = [".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".webm", ".aac"];
+const LOCAL_MUSIC_INDEX_TTL_MS = 5 * 60 * 1000; // rescan the library folder index after 5 minutes
 
 module.exports = {
     // Environment
@@ -75,7 +77,7 @@ module.exports = {
     YTDLP_BIN,
     YTDLP_PLUGIN_DIR,
     DOWNLOAD_DIR,
-    MAPPING_DIR,
+    LOCAL_MUSIC_DIR,
     MAX_CACHE,
     DOWNLOAD_TIMEOUT_MS,
     SEARCH_TIMEOUT_MS,
@@ -103,5 +105,6 @@ module.exports = {
     SEARCH_CACHE_TIMEOUT,
 
     // Local Audio
-    LOCAL_AUDIO_EXTENSIONS
+    LOCAL_AUDIO_EXTENSIONS,
+    LOCAL_MUSIC_INDEX_TTL_MS
 };

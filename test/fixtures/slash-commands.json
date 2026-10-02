@@ -101,9 +101,17 @@
     "type": 1
   },
   {
-    "options": [],
-    "name": "playchrist",
-    "description": "Spielt alle Audiodateien aus /mapping/christ ab",
+    "options": [
+      {
+        "autocomplete": true,
+        "type": 3,
+        "name": "ordner",
+        "description": "Ordner der Musikbibliothek (Tippen filtert die Liste)",
+        "required": true
+      }
+    ],
+    "name": "playlocalmusic",
+    "description": "Spielt alle Audiodateien eines Ordners aus der lokalen Musikbibliothek",
     "type": 1
   },
   {

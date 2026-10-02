@@ -28,7 +28,10 @@ const commandBuilders = [
     new SlashCommandBuilder().setName("test").setDescription("Spielt test.mp3 im Container"),
     new SlashCommandBuilder().setName("debug").setDescription("Debug-Informationen anzeigen"),
     new SlashCommandBuilder().setName("playcache").setDescription("Spielt alle Lieder aus dem Cache ab"),
-    new SlashCommandBuilder().setName("playchrist").setDescription("Spielt alle Audiodateien aus /mapping/christ ab"),
+    new SlashCommandBuilder()
+        .setName("playlocalmusic")
+        .setDescription("Spielt alle Audiodateien eines Ordners aus der lokalen Musikbibliothek")
+        .addStringOption(opt => opt.setName("ordner").setDescription("Ordner der Musikbibliothek (Tippen filtert die Liste)").setRequired(true).setAutocomplete(true)),
     new SlashCommandBuilder().setName("refresh").setDescription("Commands neu registrieren (Admin only)"),
     new SlashCommandBuilder().setName("clearcache").setDescription("Cache leeren (Admin only)"),
     new SlashCommandBuilder().setName("repeatsingle").setDescription("Wiederholt den aktuellen Song"),

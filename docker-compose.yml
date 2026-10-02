@@ -13,7 +13,7 @@ services:
       # yt-dlp Configuration (fixed in Docker container)
       - YTDLP_PATH=/opt/venv/bin/yt-dlp
       - DOWNLOAD_DIR=/app/downloads
-      - MAPPING_DIR=/mapping/christ
+      - LOCAL_MUSIC_DIR=/music
 
       # User-configurable settings from .env
       - MAX_CACHE=${MAX_CACHE:-200}
@@ -27,8 +27,8 @@ services:
       # Downloads directory - bind mount to host path from .env
       - ${DOWNLOAD_HOST_PATH:-./downloads}:/app/downloads
 
-      # Local audio files for /playchrist
-      - ${MAPPING_HOST_PATH:-./mapping/christ}:/mapping/christ:ro
+      # Local music library for /playlocalmusic (read-only; every subfolder is selectable)
+      - ${LOCAL_MUSIC_HOST_PATH:-./music}:/music:ro
 
       # Logs directory (optional: can also be bind mount)
       - ${LOGS_HOST_PATH:-./logs}:/app/logs
@@ -38,8 +38,8 @@ services:
     networks:
       - musicbot-network
 
-    # Der Container läuft als uid 99 / gid 100 (musicbot). Die Musik-Bibliothek
-    # für /playchrist gehört auf dem Host 1000:1000 mit Gruppenrechten 750/640 —
+    # Der Container läuft als uid 99 / gid 100 (musicbot). Teile der Musik-Bibliothek
+    # für /playlocalmusic gehören auf dem Host 1000:1000 mit Gruppenrechten 750/640 —
     # die Zusatz-Gruppe erlaubt Lesen, ohne die Host-Dateien anzufassen.
     group_add:
       - "1000"

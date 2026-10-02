@@ -31,9 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Die Gruppe 'users' (gid 100) existiert im Debian-Basis-Image bereits.
 RUN useradd --uid 99 --gid 100 --no-create-home --home-dir /app --shell /usr/sbin/nologin musicbot
 
-# Temp-Verzeichnis für Downloads und lokalen Mapping-Ordner erstellen
-RUN mkdir -p /tmp/musicbot_downloads /mapping/christ && \
-    chown -R 99:100 /tmp/musicbot_downloads /mapping
+# Temp-Verzeichnis für Downloads und Mount-Punkt der lokalen Musikbibliothek erstellen
+RUN mkdir -p /tmp/musicbot_downloads /music && \
+    chown -R 99:100 /tmp/musicbot_downloads /music
 
 # yt-dlp in Virtual Environment installieren (nur im Container).
 # chown im selben Layer: der Entrypoint macht zur Laufzeit

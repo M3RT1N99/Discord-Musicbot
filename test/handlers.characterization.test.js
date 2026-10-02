@@ -13,18 +13,28 @@ const { PassThrough } = require('stream');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'musicbot-handlers-'));
 const DOWNLOADS = path.join(TMP, 'downloads');
-const MAPPING = path.join(TMP, 'mapping');
+const MUSIC = path.join(TMP, 'music');
 process.env.DOWNLOAD_DIR = DOWNLOADS;
 process.env.LOG_DIR = TMP;
 process.env.LOG_LEVEL = 'error';
-process.env.MAPPING_DIR = MAPPING;
+process.env.LOCAL_MUSIC_DIR = MUSIC;
 process.env.TOKEN = 'test-token';
 fs.mkdirSync(DOWNLOADS, { recursive: true });
-fs.mkdirSync(path.join(MAPPING, 'sub'), { recursive: true });
-fs.writeFileSync(path.join(MAPPING, '10 Zehn.mp3'), 'x');
-fs.writeFileSync(path.join(MAPPING, '2 Zwei.MP3'), 'x');
-fs.writeFileSync(path.join(MAPPING, 'sub', 'b.opus'), 'x');
-fs.writeFileSync(path.join(MAPPING, 'notes.txt'), 'x');
+// Library: nested folders, a hidden folder, a folder without audio, a path > 100 chars
+const LONG_REL = 'Tief/' + 'x'.repeat(60) + '/' + 'y'.repeat(50);
+const musicFile = (rel, content = 'x') => {
+    fs.mkdirSync(path.dirname(path.join(MUSIC, rel)), { recursive: true });
+    fs.writeFileSync(path.join(MUSIC, rel), content);
+};
+musicFile('Gemeinde Gottes/10 Zehn.mp3');
+musicFile('Gemeinde Gottes/2 Zwei.MP3');
+musicFile('Gemeinde Gottes/sub/b.opus');
+musicFile('Gemeinde Gottes/notes.txt');
+musicFile('Gemeinde Gottes/.hidden/h.mp3');
+musicFile('Spotify/Bänger/x.mp3');
+musicFile('Leer/cover.jpg');
+musicFile(LONG_REL + '/deep.flac');
+musicFile('loose.mp3');
 
 // ---- fakes that must exist BEFORE the bot modules load (they destructure at require time)
 const cp = require('child_process');
@@ -67,6 +77,9 @@ const CH = require('../src/commands/commandHandlers');
 const ui = require('../src/ui/messages');
 const logger = require('../src/utils/logger');
 const { MAX_QUERY_LENGTH } = require('../src/config/constants');
+const { sanitizeString } = require('../src/utils/validation');
+const { LocalMusicLibrary } = require('../src/library/LocalMusicLibrary');
+const library = new LocalMusicLibrary(MUSIC);
 
 // ---- helpers
 const SUPPRESS = [MessageFlags.SuppressNotifications];
@@ -145,6 +158,7 @@ function ctx(interaction, extra = {}) {
         searchCache: { store: new Map(), set(k, v) { this.store.set(k, v); }, get(k) { return this.store.get(k) ?? null; }, delete(k) { this.store.delete(k); } },
         rateLimiter: { check: () => true },
         backgroundDownloader: fakeBackground(),
+        localMusic: library,
         guildQueues: QM.guildQueues,
         createPlayerForGuild: () => fakePlayer('playing'),
         createGuildQueue: QM.createGuildQueue,
@@ -457,36 +471,127 @@ test('/playcache edge cases: no voice, empty cache, nothing valid, queue limit, 
     assert.deepEqual(i.log, [['deferReply'], ['editReply', '❌ Fehler beim Beitreten: kein Zugriff']]);
 });
 
-test('/playchrist queues all local audio files in natural order', async () => {
-    const i = fakeInteraction({ guildId: 'g-christ' });
+test('/playlocalmusic queues all audio files of the chosen folder in natural order', async () => {
+    const i = fakeInteraction({ guildId: 'g-local', options: { ordner: 'Gemeinde Gottes' } });
     const c = ctx(i);
-    await CH.handlePlaychristCommand(c);
+    await CH.handlePlayLocalMusicCommand(c);
 
-    const queue = QM.guildQueues.get('g-christ');
+    const queue = QM.guildQueues.get('g-local');
     assert.ok(queue, 'joined and created a queue');
     assert.equal(queue.audioCache, c.audioCache);
     const local = (rel, title) => ({
-        requesterId: 'u1', title, filepath: path.join(MAPPING, rel), url: null, duration: 'lokale Datei',
-        isLocalFile: true, playlistTitle: 'mapping/christ', relativePath: rel
+        requesterId: 'u1', title, filepath: path.join(MUSIC, 'Gemeinde Gottes', rel), url: null, duration: 'lokale Datei',
+        isLocalFile: true, playlistTitle: 'Gemeinde Gottes', relativePath: path.join('Gemeinde Gottes', rel)
     });
     assert.deepEqual(queue.songs, [
         local('2 Zwei.MP3', '2 Zwei'),
         local('10 Zehn.mp3', '10 Zehn'),
         local(path.join('sub', 'b.opus'), 'b')
-    ]);
-    assert.deepEqual(i.log, [['deferReply'], ['editReply', `✅ **3** lokale Audiodateien aus \`${MAPPING}\` zur Queue hinzugefügt.`]]);
-    assert.deepEqual(ensureCalls, [['g-christ', c.audioCache]]);
+    ], 'hidden folders and non-audio files are skipped');
+    assert.deepEqual(i.log, [['deferReply'], ['editReply', '✅ **3** lokale Audiodateien aus `Gemeinde Gottes` zur Queue hinzugefügt.']]);
+    assert.deepEqual(ensureCalls, [['g-local', c.audioCache]]);
 });
 
-test('/playchrist edge cases: no voice, join failure', async () => {
-    let i = fakeInteraction({ voice: false });
-    await CH.handlePlaychristCommand(ctx(i));
+test('/playlocalmusic resolves nested folders, typed names and hashed long paths', async () => {
+    const run = async (ordner) => {
+        const { guildId, queue } = newQueue('playing');
+        const i = fakeInteraction({ guildId, options: { ordner } });
+        await CH.handlePlayLocalMusicCommand(ctx(i));
+        return { queue, reply: i.log.at(-1)[1] };
+    };
+
+    let r = await run('Spotify/Bänger');
+    assert.equal(r.reply, '✅ **1** lokale Audiodateien aus `Spotify/Bänger` zur Queue hinzugefügt.');
+    assert.equal(r.queue.songs[0].playlistTitle, 'Spotify/Bänger');
+    assert.equal(r.queue.songs[0].relativePath, path.join('Spotify', 'Bänger', 'x.mp3'));
+
+    r = await run('  gemeinde gottes  ');
+    assert.equal(r.queue.songs.length, 3, 'typed name, other case and padding');
+
+    r = await run('BANGER');
+    assert.equal(r.queue.songs[0].playlistTitle, 'Spotify/Bänger', 'folder name alone, accents folded');
+
+    const [choice] = await library.autocomplete('yyy');
+    assert.match(choice.value, /^#[0-9a-f]{16}$/, 'paths over 100 chars get a hashed value');
+    r = await run(choice.value);
+    assert.equal(r.queue.songs.length, 1);
+    assert.equal(r.queue.songs[0].playlistTitle, LONG_REL);
+});
+
+test('/playlocalmusic rejects unknown folders, folders without audio and path tricks', async () => {
+    const tricks = ['Gibts nicht', 'Leer', '..', '../downloads', 'Gemeinde Gottes/../../downloads', DOWNLOADS, '/'];
+    for (const ordner of tricks) {
+        const i = fakeInteraction({ guildId: 'g-local-none', options: { ordner } });
+        await CH.handlePlayLocalMusicCommand(ctx(i));
+        assert.deepEqual(i.log, [['deferReply'], ['editReply', `❌ Ordner nicht gefunden: \`${sanitizeString(ordner)}\` — wähle einen Ordner aus der Liste.`]], ordner);
+        assert.equal(QM.guildQueues.has('g-local-none'), false, ordner);
+    }
+});
+
+test('/playlocalmusic edge cases: no voice, missing library, vanished or emptied folder, join failure', async (t) => {
+    const errored = t.mock.method(logger, 'error', () => { });
+    let i = fakeInteraction({ voice: false, options: { ordner: 'Gemeinde Gottes' } });
+    await CH.handlePlayLocalMusicCommand(ctx(i));
     assert.deepEqual(i.log, [['reply', { content: 'Du musst in einem Sprachkanal sein!', ephemeral: true }]]);
 
+    const missingRoot = path.join(TMP, 'no-music');
+    i = fakeInteraction({ guildId: 'g-local-2', options: { ordner: 'Gemeinde Gottes' } });
+    await CH.handlePlayLocalMusicCommand(ctx(i, { localMusic: new LocalMusicLibrary(missingRoot) }));
+    assert.deepEqual(i.log, [['deferReply'], ['editReply', `❌ Musikordner nicht gefunden: \`${missingRoot}\``]]);
+
+    // Indexed while the files existed, changed before the command ran
+    const root = path.join(TMP, 'volatile');
+    fs.mkdirSync(path.join(root, 'Weg'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'Leer'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'Weg', 'a.mp3'), 'x');
+    fs.writeFileSync(path.join(root, 'Leer', 'a.mp3'), 'x');
+    const volatile = new LocalMusicLibrary(root);
+    await volatile.refresh();
+    fs.rmSync(path.join(root, 'Weg'), { recursive: true });
+    fs.rmSync(path.join(root, 'Leer', 'a.mp3'));
+
+    i = fakeInteraction({ guildId: 'g-local-3', options: { ordner: 'Weg' } });
+    await CH.handlePlayLocalMusicCommand(ctx(i, { localMusic: volatile }));
+    assert.deepEqual(i.log, [['deferReply'], ['editReply', '❌ Ordner `Weg` konnte nicht gelesen werden.']]);
+
+    i = fakeInteraction({ guildId: 'g-local-3', options: { ordner: 'Leer' } });
+    await CH.handlePlayLocalMusicCommand(ctx(i, { localMusic: volatile }));
+    assert.deepEqual(i.log, [['deferReply'], ['editReply', '📁 Keine Audiodateien in `Leer` gefunden. Unterstützt: .mp3, .m4a, .wav, .flac, .ogg, .opus, .webm, .aac']]);
+    assert.equal(QM.guildQueues.has('g-local-3'), false);
+
     joinImpl = async () => { throw new Error('voll'); };
-    i = fakeInteraction({ guildId: 'g-christ-2' });
-    await CH.handlePlaychristCommand(ctx(i));
+    i = fakeInteraction({ guildId: 'g-local-4', options: { ordner: 'Gemeinde Gottes' } });
+    await CH.handlePlayLocalMusicCommand(ctx(i));
     assert.deepEqual(i.log, [['deferReply'], ['editReply', '❌ Fehler beim Beitreten: voll']]);
+
+    const logged = errored.mock.calls.map(c => c.arguments[0]);
+    assert.equal(logged.length, 2);
+    assert.ok(logged[0].startsWith('[PLAYLOCAL] Could not index music library: '), logged[0]);
+    assert.ok(logged[1].startsWith('[PLAYLOCAL] Could not read Weg: '), logged[1]);
+});
+
+test('/playlocalmusic autocomplete answers once with matching folders and file counts', async (t) => {
+    const answer = async (focused, localMusic = library) => {
+        const responses = [];
+        const interaction = { options: { getFocused: () => focused }, respond: async (choices) => { responses.push(choices); } };
+        await CH.handlePlayLocalMusicAutocomplete({ interaction, localMusic });
+        assert.equal(responses.length, 1, 'responds exactly once');
+        return responses[0];
+    };
+
+    assert.deepEqual(await answer('bän'), [{ name: 'Spotify/Bänger (1)', value: 'Spotify/Bänger' }]);
+    assert.deepEqual((await answer('')).map(c => c.name), [
+        'Gemeinde Gottes (3)', 'Spotify (1)', 'Tief (1)',
+        'Gemeinde Gottes/sub (1)', 'Spotify/Bänger (1)', `Tief/${'x'.repeat(60)} (1)`, `…${LONG_REL.slice(-(100 - ' (1)'.length - 1))} (1)`
+    ], 'top-level folders first, long paths cut at the front');
+
+    const warned = t.mock.method(logger, 'warn', () => { });
+    assert.deepEqual(await answer('x', new LocalMusicLibrary(path.join(TMP, 'no-music'))), []);
+    assert.match(warned.mock.calls[0].arguments[0], /^\[PLAYLOCAL\] Autocomplete failed: /);
+
+    // An expired interaction (respond rejects) must not throw
+    const expired = { options: { getFocused: () => '' }, respond: async () => { throw new Error('Unknown interaction'); } };
+    await CH.handlePlayLocalMusicAutocomplete({ interaction: expired, localMusic: library });
 });
 
 // =============================== now-playing buttons ===============================

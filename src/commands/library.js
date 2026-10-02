@@ -1,40 +1,18 @@
 // src/commands/library.js
-// /playcache and /playchrist: queue cached downloads or local audio files
+// /playcache and /playlocalmusic: queue cached downloads or local library folders
 
 const fs = require('fs');
 const path = require('path');
-const { MAPPING_DIR, LOCAL_AUDIO_EXTENSIONS, MAX_SONGS_PER_QUEUE } = require('../config/constants');
+const { LOCAL_AUDIO_EXTENSIONS, MAX_SONGS_PER_QUEUE } = require('../config/constants');
 const { ensureNextTrackDownloadedAndPlay } = require('../queue/QueueManager');
 const { remoteSongCount } = require('../queue/queueOps');
+const { collectLocalAudioFiles } = require('../library/LocalMusicLibrary');
 const { sanitizeString } = require('../utils/validation');
 const { ensureQueueAndJoin } = require('./queueSession');
 const logger = require('../utils/logger');
 
-async function collectLocalAudioFiles(baseDir) {
-    const files = [];
-
-    async function walk(dir) {
-        const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-
-        for (const entry of entries) {
-            const fullPath = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-                await walk(fullPath);
-                continue;
-            }
-
-            if (!entry.isFile()) continue;
-
-            const ext = path.extname(entry.name).toLowerCase();
-            if (LOCAL_AUDIO_EXTENSIONS.includes(ext)) {
-                files.push(fullPath);
-            }
-        }
-    }
-
-    await walk(baseDir);
-    return files.sort((a, b) => path.relative(baseDir, a).localeCompare(path.relative(baseDir, b), undefined, { numeric: true, sensitivity: 'base' }));
-}
+// Folder names are shown in `code spans` — a backtick inside would break them
+const codeSpan = (text) => '`' + String(text).replace(/`/g, "'") + '`';
 
 /**
  * /playcache – add all cached songs to queue
@@ -89,10 +67,11 @@ async function handlePlaycacheCommand(context) {
 }
 
 /**
- * /playchrist - add all local audio files from /mapping/christ to queue
+ * /playlocalmusic <ordner> – add all audio files of a library folder (and its
+ * subfolders) to the queue. The folder comes from the autocomplete list.
  */
-async function handlePlaychristCommand(context) {
-    const { interaction, audioCache } = context;
+async function handlePlayLocalMusicCommand(context) {
+    const { interaction, audioCache, localMusic } = context;
     const memberVoice = interaction.member?.voice?.channel;
 
     if (!memberVoice) {
@@ -101,27 +80,29 @@ async function handlePlaychristCommand(context) {
 
     await interaction.deferReply();
 
-    let stat;
+    const requested = interaction.options.getString('ordner', true);
+    let folder;
     try {
-        stat = await fs.promises.stat(MAPPING_DIR);
-    } catch {
-        return interaction.editReply(`❌ Mapping-Ordner nicht gefunden: \`${MAPPING_DIR}\``);
+        folder = await localMusic.resolve(requested);
+    } catch (err) {
+        logger.error(`[PLAYLOCAL] Could not index music library: ${err.message}`);
+        return interaction.editReply(`❌ Musikordner nicht gefunden: ${codeSpan(localMusic.rootDir)}`);
     }
 
-    if (!stat.isDirectory()) {
-        return interaction.editReply(`❌ Mapping-Pfad ist kein Ordner: \`${MAPPING_DIR}\``);
+    if (!folder) {
+        return interaction.editReply(`❌ Ordner nicht gefunden: ${codeSpan(sanitizeString(requested).slice(0, 100))} — wähle einen Ordner aus der Liste.`);
     }
 
     let audioFiles;
     try {
-        audioFiles = await collectLocalAudioFiles(MAPPING_DIR);
+        audioFiles = await collectLocalAudioFiles(folder.absPath);
     } catch (err) {
-        logger.error(`[PLAYCHRIST] Could not read mapping directory: ${err.message}`);
-        return interaction.editReply('❌ Mapping-Ordner konnte nicht gelesen werden.');
+        logger.error(`[PLAYLOCAL] Could not read ${folder.relPath}: ${err.message}`);
+        return interaction.editReply(`❌ Ordner ${codeSpan(folder.relPath)} konnte nicht gelesen werden.`);
     }
 
     if (audioFiles.length === 0) {
-        return interaction.editReply(`📁 Keine Audiodateien im Mapping-Ordner gefunden. Unterstützt: ${LOCAL_AUDIO_EXTENSIONS.join(', ')}`);
+        return interaction.editReply(`📁 Keine Audiodateien in ${codeSpan(folder.relPath)} gefunden. Unterstützt: ${LOCAL_AUDIO_EXTENSIONS.join(', ')}`);
     }
 
     let queue;
@@ -131,9 +112,8 @@ async function handlePlaychristCommand(context) {
         return interaction.editReply(`❌ Fehler beim Beitreten: ${e.message}`);
     }
 
-    // Local mapping-folder files bypass MAX_SONGS_PER_QUEUE: no download, negligible memory per entry
+    // Local library files bypass MAX_SONGS_PER_QUEUE: no download, negligible memory per entry
     for (const filepath of audioFiles) {
-        const relativePath = path.relative(MAPPING_DIR, filepath);
         const title = sanitizeString(path.basename(filepath, path.extname(filepath))) || path.basename(filepath);
 
         queue.songs.push({
@@ -143,19 +123,33 @@ async function handlePlaychristCommand(context) {
             url: null,
             duration: 'lokale Datei',
             isLocalFile: true,
-            playlistTitle: 'mapping/christ',
-            relativePath
+            playlistTitle: folder.relPath,
+            relativePath: path.relative(localMusic.rootDir, filepath)
         });
     }
 
-    const replyMsg = `✅ **${audioFiles.length}** lokale Audiodateien aus \`${MAPPING_DIR}\` zur Queue hinzugefügt.`;
-
-    await interaction.editReply(replyMsg);
+    await interaction.editReply(`✅ **${audioFiles.length}** lokale Audiodateien aus ${codeSpan(folder.relPath)} zur Queue hinzugefügt.`);
 
     ensureNextTrackDownloadedAndPlay(interaction.guildId, audioCache);
 }
 
+/**
+ * Autocomplete for /playlocalmusic: library folders matching what the user typed.
+ * Never throws — on any problem Discord just gets an empty list.
+ */
+async function handlePlayLocalMusicAutocomplete(context) {
+    const { interaction, localMusic } = context;
+    let choices = [];
+    try {
+        choices = await localMusic.autocomplete(interaction.options.getFocused());
+    } catch (err) {
+        logger.warn(`[PLAYLOCAL] Autocomplete failed: ${err.message}`);
+    }
+    await interaction.respond(choices).catch(() => { });
+}
+
 module.exports = {
     handlePlaycacheCommand,
-    handlePlaychristCommand
+    handlePlayLocalMusicCommand,
+    handlePlayLocalMusicAutocomplete
 };

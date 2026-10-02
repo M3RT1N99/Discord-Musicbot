@@ -3,12 +3,13 @@
 // the slash commands and routes interactions to the handlers in src/commands/
 
 const { Client, GatewayIntentBits } = require('discord.js');
-const { TOKEN, DOWNLOAD_DIR } = require('./config/constants');
+const { TOKEN, DOWNLOAD_DIR, LOCAL_MUSIC_DIR } = require('./config/constants');
 const logger = require('./utils/logger');
 const AudioCache = require('./cache/AudioCache');
 const SearchCache = require('./cache/SearchCache');
 const BackgroundDownloader = require('./download/BackgroundDownloader');
 const RateLimiter = require('./download/RateLimiter');
+const { LocalMusicLibrary } = require('./library/LocalMusicLibrary');
 const {
     guildQueues,
     createPlayerForGuild,
@@ -23,6 +24,7 @@ const audioCache = new AudioCache(undefined, DOWNLOAD_DIR);
 const searchCache = new SearchCache();
 const rateLimiter = new RateLimiter();
 const backgroundDownloader = new BackgroundDownloader(audioCache, () => guildQueues);
+const localMusic = new LocalMusicLibrary(LOCAL_MUSIC_DIR);
 
 // Protect files still referenced by any guild queue from cache eviction
 audioCache.setInUseChecker((filepath) => {
@@ -53,13 +55,14 @@ const {
     handleTestCommand,
     handleDebugCommand,
     handlePlaycacheCommand,
-    handlePlaychristCommand,
+    handlePlayLocalMusicCommand,
     handleRefreshCommand,
     handleClearcacheCommand,
     handleRepeatSingleCommand,
     handleRepeatCommand,
     handlePlaylistChoiceButton,
-    handleNowPlayingButton
+    handleNowPlayingButton,
+    handlePlayLocalMusicAutocomplete
 } = require('./commands/commandHandlers');
 const { commandBuilders } = require('./commands/definitions');
 const { createCommandRest, commandsToJson, clearGlobalCommands, putGuildCommands } = require('./commands/registration');
@@ -79,7 +82,7 @@ const commandHandlers = new Map([
     ['test', handleTestCommand],
     ['debug', handleDebugCommand],
     ['playcache', handlePlaycacheCommand],
-    ['playchrist', handlePlaychristCommand],
+    ['playlocalmusic', handlePlayLocalMusicCommand],
     ['refresh', handleRefreshCommand],
     ['clearcache', handleClearcacheCommand],
     ['repeatsingle', handleRepeatSingleCommand],
@@ -98,6 +101,7 @@ function createContext(interaction) {
         searchCache,
         rateLimiter,
         backgroundDownloader,
+        localMusic,
         guildQueues,
         createPlayerForGuild,
         createGuildQueue,
@@ -145,6 +149,9 @@ client.once("clientReady", async () => {
     logger.setClient(client);
 
     startStatusFiles(client, guildQueues);
+
+    // Warm the library index so the first autocomplete answers instantly
+    localMusic.refresh().catch(err => logger.warn(`[LOCAL MUSIC] Could not index ${LOCAL_MUSIC_DIR}: ${err.message}`));
 
     logger.info(`✅ Logged in as ${client.user.tag}`);
     logger.info(`📊 Connected to ${client.guilds.cache.size} guilds`);
@@ -251,6 +258,18 @@ client.on("interactionCreate", async interaction => {
         return;
     }
 
+    // --- Autocomplete (option suggestions while typing) ---
+    if (interaction.isAutocomplete()) {
+        if (interaction.commandName === 'playlocalmusic') {
+            try {
+                await handlePlayLocalMusicAutocomplete(createContext(interaction));
+            } catch (err) {
+                logger.error(`[AUTOCOMPLETE ERROR] ${err.message}`);
+            }
+        }
+        return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     const commandName = interaction.commandName;
@@ -309,5 +328,6 @@ module.exports = {
     searchCache,
     rateLimiter,
     backgroundDownloader,
+    localMusic,
     guildQueues
 };

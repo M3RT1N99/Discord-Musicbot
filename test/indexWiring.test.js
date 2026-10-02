@@ -13,6 +13,9 @@ process.env.DOWNLOAD_DIR = TMP;
 process.env.LOG_DIR = TMP;
 process.env.LOG_LEVEL = 'error';
 process.env.TOKEN = 'test-token';
+process.env.LOCAL_MUSIC_DIR = path.join(TMP, 'music');
+fs.mkdirSync(path.join(TMP, 'music', 'Album'), { recursive: true });
+fs.writeFileSync(path.join(TMP, 'music', 'Album', 'song.mp3'), 'x');
 
 const { REST } = require('discord.js');
 const restCalls = [];
@@ -31,9 +34,9 @@ const HANDLER_NAMES = [
     'handlePlayCommand', 'handleSelectCommand', 'handleSearchSelect', 'handlePauseCommand',
     'handleResumeCommand', 'handleSkipCommand', 'handleStopCommand', 'handleQueueCommand',
     'handleVolumeCommand', 'handleLeaveCommand', 'handleShuffleCommand', 'handleTestCommand',
-    'handleDebugCommand', 'handlePlaycacheCommand', 'handlePlaychristCommand', 'handleRefreshCommand',
+    'handleDebugCommand', 'handlePlaycacheCommand', 'handlePlayLocalMusicCommand', 'handleRefreshCommand',
     'handleClearcacheCommand', 'handleRepeatSingleCommand', 'handleRepeatCommand',
-    'handlePlaylistChoiceButton', 'handleNowPlayingButton'
+    'handlePlaylistChoiceButton', 'handleNowPlayingButton', 'handlePlayLocalMusicAutocomplete'
 ];
 const handlerCalls = [];
 let throwFrom = null;
@@ -49,7 +52,7 @@ const { client } = bot;
 const EXPECTED_COMMANDS = require('./fixtures/slash-commands.json');
 
 const CONTEXT_KEYS = [
-    'interaction', 'audioCache', 'searchCache', 'rateLimiter', 'backgroundDownloader', 'guildQueues',
+    'interaction', 'audioCache', 'searchCache', 'rateLimiter', 'backgroundDownloader', 'localMusic', 'guildQueues',
     'createPlayerForGuild', 'createGuildQueue', 'deleteGuildQueue', 'commandBuilders', 'logger'
 ];
 
@@ -68,6 +71,7 @@ function fakeInteraction(kind, props = {}) {
         isButton: () => kind === 'button',
         isStringSelectMenu: () => kind === 'select',
         isChatInputCommand: () => kind === 'command',
+        isAutocomplete: () => kind === 'autocomplete',
         async reply(p) { replies.push({ via: 'reply', payload: p }); },
         async followUp(p) { replies.push({ via: 'followUp', payload: p }); },
         ...props
@@ -81,7 +85,7 @@ async function dispatch(interaction) {
     return handlerCalls.map(c => c.name);
 }
 
-test('commandHandlers barrel exports the 21 handlers in order', () => {
+test('commandHandlers barrel exports the 22 handlers in order', () => {
     assert.deepEqual(Object.keys(CH), HANDLER_NAMES);
 });
 
@@ -92,7 +96,11 @@ test('clientReady clears global commands, then registers the commands per guild'
     client.guilds.cache.set('g2', { id: 'g2', name: 'Guild Two' });
 
     client.emit('clientReady');
+    const warmup = bot.localMusic.scanning;
+    assert.ok(warmup, 'library index scan started on ready');
+    await warmup;
     await settle();
+    assert.deepEqual(bot.localMusic.folders.map(f => f.relPath), ['Album']);
 
     assert.deepEqual(restCalls.map(c => c.route), [
         '/applications/app1/commands',
@@ -144,7 +152,7 @@ test('chat input commands route to their handler with the shared context', async
         resume: 'handleResumeCommand', skip: 'handleSkipCommand', stop: 'handleStopCommand',
         queue: 'handleQueueCommand', volume: 'handleVolumeCommand', leave: 'handleLeaveCommand',
         shuffle: 'handleShuffleCommand', test: 'handleTestCommand', debug: 'handleDebugCommand',
-        playcache: 'handlePlaycacheCommand', playchrist: 'handlePlaychristCommand',
+        playcache: 'handlePlaycacheCommand', playlocalmusic: 'handlePlayLocalMusicCommand',
         refresh: 'handleRefreshCommand', clearcache: 'handleClearcacheCommand',
         repeatsingle: 'handleRepeatSingleCommand', repeat: 'handleRepeatCommand'
     };
@@ -159,6 +167,7 @@ test('chat input commands route to their handler with the shared context', async
         assert.equal(context.searchCache, bot.searchCache);
         assert.equal(context.rateLimiter, bot.rateLimiter);
         assert.equal(context.backgroundDownloader, bot.backgroundDownloader);
+        assert.equal(context.localMusic, bot.localMusic);
         assert.equal(context.guildQueues, bot.guildQueues);
         assert.equal(context.guildQueues, QM.guildQueues);
         assert.equal(context.createPlayerForGuild, QM.createPlayerForGuild);
@@ -185,6 +194,31 @@ test('buttons and select menus route by customId prefix', async () => {
         assert.deepEqual(await dispatch(interaction), expected, `${kind} ${customId}`);
         if (expected.length) assert.deepEqual(Object.keys(handlerCalls[0].context), CONTEXT_KEYS);
         assert.deepEqual(interaction.replies, []);
+    }
+});
+
+test('autocomplete requests route to the /playlocalmusic folder picker only', async () => {
+    const ours = fakeInteraction('autocomplete', { commandName: 'playlocalmusic' });
+    assert.deepEqual(await dispatch(ours), ['handlePlayLocalMusicAutocomplete']);
+    assert.deepEqual(Object.keys(handlerCalls[0].context), CONTEXT_KEYS);
+    assert.equal(handlerCalls[0].context.localMusic, bot.localMusic);
+    assert.deepEqual(ours.replies, []);
+
+    const other = fakeInteraction('autocomplete', { commandName: 'play' });
+    assert.deepEqual(await dispatch(other), []);
+    assert.deepEqual(other.replies, []);
+});
+
+test('a throwing autocomplete handler is logged, not answered', async (t) => {
+    const logged = t.mock.method(require('../src/utils/logger'), 'error', () => { });
+    throwFrom = 'handlePlayLocalMusicAutocomplete';
+    try {
+        const interaction = fakeInteraction('autocomplete', { commandName: 'playlocalmusic' });
+        assert.deepEqual(await dispatch(interaction), ['handlePlayLocalMusicAutocomplete']);
+        assert.deepEqual(interaction.replies, []);
+        assert.equal(logged.mock.calls.at(-1).arguments[0], '[AUTOCOMPLETE ERROR] boom');
+    } finally {
+        throwFrom = null;
     }
 });
 

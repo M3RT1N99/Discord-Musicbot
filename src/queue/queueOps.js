@@ -2,7 +2,7 @@
 // Small synchronous queue helpers shared by the command handlers
 
 /**
- * Counts queued songs that count toward MAX_SONGS_PER_QUEUE. Local mapping-folder
+ * Counts queued songs that count toward MAX_SONGS_PER_QUEUE. Local library
  * files (isLocalFile) are exempt — they need no download and use negligible memory,
  * so they neither hit the limit nor consume slots for remote/cached tracks.
  * @param {object} queue - Guild queue

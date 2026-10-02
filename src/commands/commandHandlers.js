@@ -5,7 +5,7 @@
 const { handlePlayCommand, handleSelectCommand, handleSearchSelect } = require('./play');
 const { handlePauseCommand, handleResumeCommand, handleSkipCommand, handleStopCommand, handleQueueCommand, handleVolumeCommand, handleLeaveCommand, handleShuffleCommand, handleRepeatSingleCommand, handleRepeatCommand } = require('./playback');
 const { handleTestCommand, handleDebugCommand, handleRefreshCommand, handleClearcacheCommand } = require('./maintenance');
-const { handlePlaycacheCommand, handlePlaychristCommand } = require('./library');
+const { handlePlaycacheCommand, handlePlayLocalMusicCommand, handlePlayLocalMusicAutocomplete } = require('./library');
 const { handlePlaylistChoiceButton } = require('./playlistChoice');
 const { handleNowPlayingButton } = require('./nowPlayingButtons');
 
@@ -24,11 +24,12 @@ module.exports = {
     handleTestCommand,
     handleDebugCommand,
     handlePlaycacheCommand,
-    handlePlaychristCommand,
+    handlePlayLocalMusicCommand,
     handleRefreshCommand,
     handleClearcacheCommand,
     handleRepeatSingleCommand,
     handleRepeatCommand,
     handlePlaylistChoiceButton,
-    handleNowPlayingButton
+    handleNowPlayingButton,
+    handlePlayLocalMusicAutocomplete
 };
